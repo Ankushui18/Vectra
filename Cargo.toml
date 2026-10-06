@@ -1,0 +1,95 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/vectra-core",
+  "crates/vectra-geometry",
+  "crates/vectra-dependency",
+  "crates/vectra-constraints",
+  "crates/vectra-expression",
+  "crates/vectra-operations",
+  "crates/vectra-procedural",
+  "crates/vectra-motion",
+  "crates/vectra-render",
+  "crates/vectra-export",
+  "crates/vectra-ai",
+  "crates/vectra-draw",
+  "crates/vectra-wasm",
+  "crates/vectra-file",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vectra/vectra"
+version = "0.1.0"
+
+# ── Shared dependency versions (MES §2) ──────────────────────────────
+# Single source of truth. Crates reference these via `dep.workspace = true`.
+[workspace.dependencies]
+# core
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip`: the default parser is fast but may be one ULP off. An
+# AI's number, an export's number and a saved document's number must be *the*
+# number, so every JSON hop in the workspace is exact (Task 9.0).
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+# `.vectra` compression (Task 10.0). Pure-Rust backend: no system zlib, so
+# the same bytes are produced on every platform and in every CI job.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+petgraph = "0.8"
+
+# expression (MES §7)
+logos = "0.15"
+chumsky = "0.10"
+
+# constraints (MES §9)
+cassowary = "0.3"
+nalgebra = "0.34"
+
+# geometry / operations (MES §5, §10)
+lyon = { version = "1", features = ["serialization"] }
+# Robust Rust-native 2D boolean math (Task 4.0 RULE 2). `geo::BooleanOps`
+# is the only boolean engine in the tree; lyon stays a path/tessellation crate.
+geo = "0.33"
+geo-types = "0.7"
+
+# render (MES §13)
+wgpu = "22"
+encase = "0.9"
+
+# wasm boundary (MES §15)
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+# Task 5.0: the canvas lives in the DOM and WebGPU's browser backend is
+# asynchronous (`request_adapter` is a JS promise), so the wasm half needs
+# the DOM bindings and a future executor.
+web-sys = { version = "0.3", features = ["console"] }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+# testing (MES §17)
+proptest = "1"
+
+# internal crates
+vectra-core = { path = "crates/vectra-core", version = "0.1.0" }
+vectra-geometry = { path = "crates/vectra-geometry", version = "0.1.0" }
+vectra-expression = { path = "crates/vectra-expression", version = "0.1.0" }
+vectra-dependency = { path = "crates/vectra-dependency", version = "0.1.0" }
+vectra-constraints = { path = "crates/vectra-constraints", version = "0.1.0" }
+vectra-draw = { path = "crates/vectra-draw", version = "0.1.0" }
+vectra-operations = { path = "crates/vectra-operations", version = "0.1.0" }
+vectra-procedural = { path = "crates/vectra-procedural", version = "0.1.0" }
+vectra-motion = { path = "crates/vectra-motion", version = "0.1.0" }
+vectra-render = { path = "crates/vectra-render", version = "0.1.0" }
+vectra-export = { path = "crates/vectra-export", version = "0.1.0" }
+vectra-ai = { path = "crates/vectra-ai", version = "0.1.0" }
+vectra-file = { path = "crates/vectra-file", version = "0.1.0" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
