@@ -1,0 +1,17 @@
+[package]
+name = "vectra-expression"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA expression language: lexer, parser, AST, compiler, incremental evaluator (MES §7)"
+
+[dependencies]
+vectra-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+logos.workspace = true
+chumsky = { workspace = true, features = ["pratt"] }
+
+[dev-dependencies]
+proptest.workspace = true

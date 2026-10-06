@@ -1,0 +1,28 @@
+[package]
+name = "vectra-procedural"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA procedural graph: typed node graph, generators, modifiers (MES §11)"
+
+[dependencies]
+vectra-core.workspace = true
+vectra-geometry.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+# `petgraph` is deliberately **not** a dependency. The chain's topology is
+# derived on demand from the registry (`ProceduralRegistry::topological_order`),
+# and the cycle gate is `vectra-dependency`'s — the workspace's one gate. A second
+# graph here would be a second answer to the same question (see `lib.rs`).
+
+[dev-dependencies]
+# The laws drive the *production* pipeline (gate → dispatch → dirty ids → pass),
+# so they need the real graph, the real expression engine and the real scene
+# cache — no test double.
+proptest.workspace = true
+vectra-dependency.workspace = true
+vectra-operations.workspace = true
+vectra-expression.workspace = true
+serde_json.workspace = true

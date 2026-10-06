@@ -1,0 +1,23 @@
+[package]
+name = "vectra-export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA export: export IR, SVG, React/Vue codegen"
+
+[dependencies]
+vectra-core.workspace = true
+vectra-geometry.workspace = true
+# Expression **source** (and its free variables) is what makes RULE 2 possible:
+# a slot driven by `$base * 2` has to export `base * 2`, not a number.
+vectra-expression.workspace = true
+# lyon *is* the path language (RULE 1): the IR stores lyon's serialization of a
+# true path, and `lyon` is how the IR walks one to measure it.
+lyon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

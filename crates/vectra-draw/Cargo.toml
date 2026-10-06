@@ -1,0 +1,37 @@
+[package]
+name = "vectra-draw"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "VECTRA drawing tools: the pen's cubic math, the brush's curve fitting and the Quick Shape snap (Task 10.1)"
+
+# Why this crate exists, and why it *owns no geometry*.
+#
+# Task 10.1 RULE 1 says the drawing tools must manipulate the engine's existing
+# `Parameter<Point2>` path model rather than invent a second one. Two forces make
+# that concrete:
+#
+#  * **the browser and the tests must not disagree.** The pen's handle math and
+#    the brush's fitting are the two halves of this task that are pure
+#    mathematics; a live pointer needs them at event rate, and a law needs them
+#    in a `proptest`. If the math lived in TypeScript and the laws in a Rust test,
+#    the test would prove something the app does not run. So the math lives here
+#    (native + wasm), and the UI *calls* it across the boundary it already uses.
+#  * **the snap's "silently trigger the Constraint Solver" (RULE 3) is an engine
+#    job.** It needs the evaluator, the solver's own row builders and the
+#    document — so it cannot live in React at all without re-implementing them.
+#
+# What it does *not* own: no `lyon`, no `wgpu`, no renderer. Every function's
+# output is path *data* (`Vec<PathSegment>` / `Vec<Point2>`) that the engine then
+# treats exactly like a hand-authored node.
+[dependencies]
+vectra-core.workspace = true
+vectra-geometry.workspace = true
+vectra-constraints.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
