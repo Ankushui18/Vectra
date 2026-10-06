@@ -1,0 +1,2522 @@
+//! Event-sourced commands + undo/redo (MES §14).
+//!
+//! No full-document cloning: every [`Command::apply`] returns its exact
+//! inverse, and [`CommandStack`] stores `(forward, backward)` pairs.
+//! The WASM boundary (MES §15) ships these commands as JSON from the React
+//! remote control; the engine owns all mutation.
+
+use crate::constraint::Constraint;
+use crate::document::{Document, MotionTrack, Node, NodeKind, PathSegment};
+use crate::error::VectraError;
+use crate::geom::{Color, Point2};
+use crate::ids::{
+    ArtboardId, ConstraintId, ExpressionId, LayerId, NodeId, OperationId, TrackId, VariableId,
+};
+use crate::layers::ArtboardRecord;
+use crate::layers::LayerRecord;
+use crate::operation::{OperationKind, OperationNode};
+use crate::param::{MotionBinding, NodeOutputId, ParamValue, Parameter};
+use crate::procedural::ProceduralNode;
+use crate::style::AppearanceLayer;
+use serde::{Deserialize, Serialize};
+
+/// All mutations to a [`Document`]. Serialized over the WASM bridge as
+/// externally-tagged JSON, e.g.
+/// `{"type":"SetParameter","node_id":"…","property":"width","value":{"Float":{"Variable":"base"}}}`.
+///
+/// Field names use `snake_case` on the wire to match the JS convention.
+///
+/// `CreateNode` owns a full `NodeKind` by value: commands are user-frequency
+/// (never per-frame), undo entries must own their redo payload, and ~320 bytes
+/// is irrelevant next to the document they mutate. Boxing would only add
+/// indirection without a measurable win.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Command {
+    CreateNode {
+        id: NodeId,
+        kind: NodeKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Draw-order slot. `None` = append. `Some(i)` restores an undo slot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+    },
+    DeleteNode {
+        id: NodeId,
+    },
+    SetParameter {
+        node_id: NodeId,
+        property: String,
+        value: ParamValue,
+    },
+    SetVariable {
+        name: VariableId,
+        value: f64,
+    },
+    RemoveVariable {
+        name: VariableId,
+    },
+    /// Define (or redefine) an expression source. Validation is a boundary
+    /// concern (`vectra-wasm` pre-compiles); core stores the source.
+    DefineExpression {
+        id: ExpressionId,
+        source: String,
+    },
+    RemoveExpression {
+        id: ExpressionId,
+    },
+    /// Register a hard mathematical rule (MES §9, Task 3.1). The engine re-runs
+    /// the solver immediately after this applies; the properties it adjusts
+    /// belong to *this* history entry, so one undo reverts rule and geometry
+    /// together.
+    AddConstraint {
+        constraint: Constraint,
+    },
+    RemoveConstraint {
+        id: ConstraintId,
+    },
+    /// Park or re-arm a registered constraint without deleting it.
+    SetConstraintEnabled {
+        id: ConstraintId,
+        enabled: bool,
+    },
+    /// Start a drag gesture on a node (Task 3.2).
+    ///
+    /// Purely a *session* command: it changes no document state, it tells the
+    /// engine to open a live solver session in which the node's canonical
+    /// position slots are Cassowary **edit variables** at `STRONG`. Every
+    /// following `UpdateDrag` nudges them with `suggest_value`, and the geometry
+    /// that moves (this node plus whatever the constraints pull along) is
+    /// applied as ordinary writes, folded into the single history entry that
+    /// `EndDrag` records.
+    BeginDrag {
+        node_id: NodeId,
+    },
+    /// Move a dragged node to an **absolute** position, resolved by the solver.
+    ///
+    /// `x`/`y` are the target values of the node's canonical position slots
+    /// (`x`/`y` for a rectangle, `cx`/`cy` for a circle or arc). The engine
+    /// routes this through the open drag session — never through a bare
+    /// `SetParameter` write.
+    UpdateDrag {
+        node_id: NodeId,
+        x: f64,
+        y: f64,
+    },
+    /// Finish a drag gesture: the last solved values stay in the document as
+    /// literals, the edit variables are released, and the gesture becomes one
+    /// undoable entry.
+    EndDrag {
+        node_id: NodeId,
+    },
+    /// Register a non-destructive operation (MES §10, Task 4.0).
+    ///
+    /// The **inputs are not touched**: the new [`OperationNode`] merely reads
+    /// their evaluated geometry, so this command mutates only the operation
+    /// registry. The id is carried by the command (like `CreateNode`), so undo
+    /// and redo address the same virtual node.
+    ApplyOperation {
+        id: OperationId,
+        kind: OperationKind,
+        inputs: Vec<NodeId>,
+    },
+    /// Withdraw an operation. The inputs live on exactly as they were (RULE 1);
+    /// only the virtual result disappears.
+    RemoveOperation {
+        id: OperationId,
+    },
+    /// Park or re-arm an operation without deleting it: a parked operation
+    /// keeps its inputs and its place in the registry, but contributes no
+    /// geometry to the scene.
+    SetOperationEnabled {
+        id: OperationId,
+        enabled: bool,
+    },
+    /// Bind a motion source to a numeric slot (MES §12, Task 6.0).
+    ///
+    /// The slot keeps its identity and its address: this is an ordinary
+    /// parameter write whose *source* happens to be a spring, a state branch or
+    /// a keyframe track. The inverse is therefore the generic
+    /// `SetParameter { value: <what the slot held before> }`, which restores a
+    /// literal, a variable reference or a previous binding exactly — binding and
+    /// unbinding are both undoable, with no special-case inverse machinery.
+    ///
+    /// Motion **samples** never write: this command records where the animation
+    /// starts, not where it is now.
+    BindMotion {
+        node_id: NodeId,
+        property: String,
+        binding: MotionBinding,
+    },
+    /// Create or replace a keyframe track (validated on insertion). The inverse
+    /// is the previous track, or [`Command::RemoveMotionTrack`] if there was
+    /// none.
+    SetMotionTrack {
+        track: MotionTrack,
+    },
+    /// Remove a keyframe track. The inverse restores it verbatim.
+    RemoveMotionTrack {
+        track_id: TrackId,
+    },
+    /// Register a procedural node (MES §11, Task 7.0).
+    ///
+    /// The record is carried whole — kind, wiring, operands, style — which is
+    /// what makes the inverse exact with no reconstruction. Nothing else in the
+    /// document is touched: a node's *sources* are read through its `Source`
+    /// wiring (Task 4.0 RULE 1), never mutated by adding it.
+    AddProceduralNode {
+        node: ProceduralNode,
+    },
+    /// Withdraw a procedural node. The inverse restores the record **and** the
+    /// wires other nodes had into it, so undo puts the graph back exactly as it
+    /// was (a downstream node is never left dangling by a redo, either).
+    RemoveProceduralNode {
+        id: NodeId,
+    },
+    /// Wire an input port to an upstream output port (RULE 1: the types must
+    /// match, and the wire must not close a chain cycle — both rejected before
+    /// this command touches the document).
+    ConnectProcedural {
+        node_id: NodeId,
+        port: crate::ids::PortId,
+        from: NodeOutputId,
+    },
+    /// Unwire an input port. The inverse re-connects the exact address.
+    DisconnectProcedural {
+        node_id: NodeId,
+        port: crate::ids::PortId,
+    },
+    /// Write a node's operand (a `Parameter`, so a grid's spacing is as
+    /// parametric as any other number in the document).
+    ///
+    /// **RULE 3**: the value may read a variable, an expression or motion, but
+    /// never another node's procedural output — a value reference back into the
+    /// graph is a cycle wearing a disguise, and it is rejected here.
+    SetProceduralOperand {
+        node_id: NodeId,
+        port: crate::ids::PortId,
+        value: ParamValue,
+    },
+    /// Park or re-arm a procedural node: a parked node keeps its wiring but
+    /// contributes no geometry and publishes no values.
+    SetProceduralEnabled {
+        id: NodeId,
+        enabled: bool,
+    },
+    /// **Rewrite a path's vertex list** (Task 10.1, the drawing tools).
+    ///
+    /// This is the authoring command behind the Pen tool, the Vector Brush and
+    /// every handle drag, and the reason it exists as a command rather than as a
+    /// sequence of point writes is a **type** fact, not a convenience one: a
+    /// segment's *kind* is part of its type. A `Line` has one endpoint, a
+    /// `Cubic` has an endpoint and two control points, and switching between
+    /// them is not a value change `SetParameter` can express — no sequence of
+    /// point writes turns a line into a curve.
+    ///
+    /// `SetParameter` remains the tool for editing a point *within* a segment
+    /// (a handle drag, an anchor nudge) — [`crate::document::Node::path_slots`]
+    /// enumerates every such slot, and the drawing tools use those writes
+    /// wherever they can. This command is for the structural edit.
+    ///
+    /// ## The inverse: the ambiguity function is the identity
+    ///
+    /// A path's geometry is exactly two fields (`start` and `segments`), so the
+    /// inverse is the same command carrying the values it replaced — no diffing,
+    /// no special cases, total and lossless:
+    ///
+    /// ```text
+    ///   forward  = SetPath { id, start: draft,   segments: draft   }
+    ///   backward = SetPath { id, start: current, segments: current }
+    /// ```
+    ///
+    /// Undo therefore restores a pen sketch, a brush stroke *and* a snapped
+    /// primitive identically. A node whose kind is not a `Path` is refused
+    /// rather than silently ignored.
+    SetPath {
+        id: NodeId,
+        start: Parameter<Point2>,
+        segments: Vec<PathSegment>,
+    },
+    /// **Rewrite a node's paint stack** (Task 10.2 RULE 3).
+    ///
+    /// The stack is *structure*: adding a second stroke, reordering fills and
+    /// switching a fill from solid to a linear gradient all change the list's
+    /// length or the shape of its entries, which no sequence of `SetParameter`
+    /// writes can express — the same argument that gave the drawing tools
+    /// [`Command::SetPath`]. Scalars *inside* the stack (an opacity, a stroke
+    /// width, a gradient's frame, a solid colour) stay ordinary `SetParameter`
+    /// writes, so a slider drag is one write per sample and the panel needs no
+    /// special case.
+    ///
+    /// Two fields, one inverse, exactly like `SetPath`: the command carries the
+    /// whole list, so undo is the same command holding what it replaced.
+    SetAppearances {
+        node_id: NodeId,
+        appearances: Vec<AppearanceLayer>,
+    },
+    /// Show or hide a node (Task 10.2 RULE 4). One `bool`, one history entry,
+    /// **no re-evaluation** — the event it publishes is `NodeFlagsChanged`.
+    SetNodeVisible {
+        id: NodeId,
+        visible: bool,
+    },
+    /// Lock or unlock a node. A locked node is skipped by hit-testing (so a
+    /// click passes through to what is underneath) and by the selection tools,
+    /// but it still draws.
+    SetNodeLocked {
+        id: NodeId,
+        locked: bool,
+    },
+    /// Rename a node. Names are plain strings — not parametric in Phase 1 — so
+    /// this is the only writer.
+    RenameNode {
+        id: NodeId,
+        name: String,
+    },
+    /// **Create a layer** (Task 10.2 RULE 1).
+    CreateLayer {
+        id: LayerId,
+        name: String,
+        /// Z-position among layers; `None` = on top.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        /// Which artboard owns it; `None` = the active one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artboard: Option<ArtboardId>,
+    },
+    /// Delete a layer. Its nodes are **not** deleted: they become unassigned and
+    /// keep drawing (the inverse restores the layer with its children, so undo
+    /// puts the arrangement back exactly).
+    DeleteLayer {
+        id: LayerId,
+    },
+    RenameLayer {
+        id: LayerId,
+        name: String,
+    },
+    /// Toggle a layer's eye. Same contract as [`Command::SetNodeVisible`]: a
+    /// flag, one history entry, no re-evaluation.
+    SetLayerVisible {
+        id: LayerId,
+        visible: bool,
+    },
+    /// Toggle a layer's padlock: its nodes stay visible but stop responding to
+    /// the pointer.
+    SetLayerLocked {
+        id: LayerId,
+        locked: bool,
+    },
+    /// Move a layer in the z-order. Its nodes travel with it — a layer is a unit
+    /// in the draw order, which is what makes dragging one in the panel move
+    /// everything on it.
+    ReorderLayer {
+        id: LayerId,
+        index: usize,
+    },
+    /// Move a node to a layer. Membership is the only thing that changes: the
+    /// node's identity, geometry and style are untouched, which is what makes
+    /// reorganizing a document non-destructive.
+    AssignNodeToLayer {
+        node_id: NodeId,
+        layer: LayerId,
+    },
+    /// Take a node out of every layer. It keeps drawing — it is unassigned, not
+    /// deleted — and it is the exact inverse of assigning a node that had no
+    /// layer, which is why it exists as a command rather than as a special case
+    /// of [`Command::AssignNodeToLayer`].
+    DetachNodeFromLayers {
+        node_id: NodeId,
+    },
+    /// **Create an artboard** (Task 10.2 RULE 2): a named frame with a bounding
+    /// box and a background colour.
+    /// **Move a node into a group, out of every group, or to another layer's
+    /// top level** — and to a position among the destination's siblings
+    /// (Task 10.4 RULE 1).
+    ///
+    /// `parent: None` means "listed directly by the layer", which is not the same
+    /// as "unassigned" ([`Command::DetachNodeFromLayers`] is that): the node keeps
+    /// its layer and leaves only its group.
+    ///
+    /// Refused typed before anything moves when the destination is not a group
+    /// (`NotAGroup`) or is the node itself or one of its descendants
+    /// (`GroupCycle`) — a document can never hold a group inside itself, so the
+    /// drag that would make one is answered instead of silently ignored.
+    SetNodeParent {
+        id: NodeId,
+        parent: Option<NodeId>,
+        index: usize,
+    },
+    CreateArtboard {
+        id: ArtboardId,
+        name: String,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        #[serde(default = "default_artboard_background")]
+        background: Color,
+    },
+    /// Delete an artboard. Its layers survive (they become unlisted), because
+    /// deleting a frame is not deleting the artwork in it.
+    DeleteArtboard {
+        id: ArtboardId,
+    },
+    RenameArtboard {
+        id: ArtboardId,
+        name: String,
+    },
+    /// Re-frame an artboard (the move/resize handle on its border).
+    SetArtboardBounds {
+        id: ArtboardId,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    SetArtboardBackground {
+        id: ArtboardId,
+        background: Color,
+    },
+    /// Switch the active artboard. A pointer, not structure — but undoable like
+    /// everything else, because a designer who jumped boards by accident
+    /// expects ⌘Z to take them back.
+    SetActiveArtboard {
+        id: ArtboardId,
+    },
+    /// Make a layer current: the one `CreateNode` fills from now on.
+    SetActiveLayer {
+        id: LayerId,
+    },
+    /// A composite: apply children in order; the inverse is the reversed
+    /// inverses. Used for one user action whose document effect is several
+    /// mutations (e.g. `DeleteNode` also withdrawing the constraints that
+    /// targeted the node, or a solver pass amending what it adjusted).
+    Batch {
+        commands: Vec<Command>,
+    },
+}
+
+/// The background a new artboard gets when the caller does not say: white, the
+/// colour a designer means by "a blank canvas" in nine cases out of ten, and the
+/// only default that never makes artwork look wrong.
+fn default_artboard_background() -> Color {
+    Color::WHITE
+}
+
+impl Command {
+    /// Human-readable label for undo menus / devtools.
+    pub fn label(&self) -> String {
+        match self {
+            Self::CreateNode { kind, .. } => format!("Create {}", kind.tag()),
+            Self::DeleteNode { .. } => "Delete node".to_string(),
+            Self::SetParameter { property, .. } => format!("Set {property}"),
+            Self::SetVariable { name, .. } => format!("Set ${name}"),
+            Self::RemoveVariable { name } => format!("Remove ${name}"),
+            Self::DefineExpression { .. } => "Define expression".to_string(),
+            Self::RemoveExpression { .. } => "Remove expression".to_string(),
+            Self::AddConstraint { constraint } => {
+                format!("Add {} constraint", constraint.kind.tag())
+            }
+            Self::RemoveConstraint { .. } => "Remove constraint".to_string(),
+            Self::SetConstraintEnabled { enabled, .. } => {
+                if *enabled {
+                    "Enable constraint".to_string()
+                } else {
+                    "Disable constraint".to_string()
+                }
+            }
+            Self::ApplyOperation { kind, .. } => match kind {
+                OperationKind::Boolean { op } => format!("Apply {}", op.tag()),
+                other => format!("Apply {}", other.tag()),
+            },
+            Self::RemoveOperation { .. } => "Remove operation".to_string(),
+            Self::SetOperationEnabled { enabled, .. } => {
+                if *enabled {
+                    "Enable operation".to_string()
+                } else {
+                    "Disable operation".to_string()
+                }
+            }
+            Self::BindMotion { binding, .. } => format!("Bind {}", binding.tag()),
+            Self::SetMotionTrack { .. } => "Set motion track".to_string(),
+            Self::RemoveMotionTrack { .. } => "Remove motion track".to_string(),
+            Self::AddProceduralNode { node } => format!("Add {} node", node.kind.tag()),
+            Self::RemoveProceduralNode { .. } => "Remove procedural node".to_string(),
+            Self::ConnectProcedural { port, .. } => format!("Connect {port}"),
+            Self::DisconnectProcedural { port, .. } => format!("Disconnect {port}"),
+            Self::SetProceduralOperand { port, .. } => format!("Set {port}"),
+            Self::SetProceduralEnabled { enabled, .. } => {
+                if *enabled {
+                    "Enable procedural node".to_string()
+                } else {
+                    "Disable procedural node".to_string()
+                }
+            }
+            Self::BeginDrag { .. } => "Begin drag".to_string(),
+            Self::UpdateDrag { .. } => "Drag".to_string(),
+            Self::EndDrag { .. } => "End drag".to_string(),
+            // One label for the whole rewrite: "Set start" would describe the
+            // first point of a stroke that has two hundred of them.
+            Self::SetPath { segments, .. } => format!("Set path ({} segment(s))", segments.len()),
+            Self::SetAppearances { appearances, .. } => {
+                format!("Set appearance ({} layer(s))", appearances.len())
+            }
+            Self::SetNodeVisible { visible, .. } => {
+                if *visible { "Show node" } else { "Hide node" }.to_string()
+            }
+            Self::SetNodeLocked { locked, .. } => {
+                if *locked { "Lock node" } else { "Unlock node" }.to_string()
+            }
+            Self::RenameNode { name, .. } => format!("Rename to \"{name}\""),
+            Self::CreateLayer { name, .. } => format!("New layer \"{name}\""),
+            Self::DeleteLayer { .. } => "Delete layer".to_string(),
+            Self::RenameLayer { name, .. } => format!("Rename layer to \"{name}\""),
+            Self::SetLayerVisible { visible, .. } => {
+                if *visible { "Show layer" } else { "Hide layer" }.to_string()
+            }
+            Self::SetLayerLocked { locked, .. } => if *locked {
+                "Lock layer"
+            } else {
+                "Unlock layer"
+            }
+            .to_string(),
+            Self::ReorderLayer { .. } => "Reorder layer".to_string(),
+            Self::AssignNodeToLayer { .. } => "Move to layer".to_string(),
+            Self::DetachNodeFromLayers { .. } => "Remove from layer".to_string(),
+            Self::SetNodeParent { parent, .. } => match parent {
+                Some(_) => "Move into group".to_string(),
+                None => "Move out of group".to_string(),
+            },
+            Self::CreateArtboard { name, .. } => format!("New artboard \"{name}\""),
+            Self::DeleteArtboard { .. } => "Delete artboard".to_string(),
+            Self::RenameArtboard { name, .. } => format!("Rename artboard to \"{name}\""),
+            Self::SetArtboardBounds { .. } => "Frame artboard".to_string(),
+            Self::SetArtboardBackground { .. } => "Artboard background".to_string(),
+            Self::SetActiveArtboard { .. } => "Switch artboard".to_string(),
+            Self::SetActiveLayer { .. } => "Switch layer".to_string(),
+            Self::Batch { commands } => match commands.len() {
+                0 => "No-op".to_string(),
+                1 => commands[0].label(),
+                n => format!("{n} changes"),
+            },
+        }
+    }
+
+    /// Events a UI should expect if this command succeeds. Computed from the
+    /// *intent* (not the outcome) so the React layer can optimistically update.
+    pub fn preview_events(&self) -> Vec<EngineEvent> {
+        match self {
+            Self::CreateNode { id, .. } => vec![
+                EngineEvent::NodesUpdated { ids: vec![*id] },
+                EngineEvent::OrderChanged,
+            ],
+            // A path rewrite is a geometry change on one node — the same event
+            // shape `SetParameter` publishes, so the incremental evaluator
+            // dirties exactly this node and nothing else.
+            Self::SetPath { id, .. } => vec![EngineEvent::NodesUpdated { ids: vec![*id] }],
+            Self::DeleteNode { id } => vec![
+                EngineEvent::NodesRemoved { ids: vec![*id] },
+                EngineEvent::OrderChanged,
+            ],
+            Self::SetParameter { node_id, .. } => vec![EngineEvent::NodesUpdated {
+                ids: vec![*node_id],
+            }],
+            // A bound slot is a node change (it must re-evaluate now). A *track*
+            // edit needs no node list: the graph carries `property → track`
+            // edges, so `TracksUpdated` dirties exactly the slots that sample it.
+            Self::BindMotion { node_id, .. } => vec![EngineEvent::NodesUpdated {
+                ids: vec![*node_id],
+            }],
+            Self::SetMotionTrack { track } => vec![EngineEvent::TracksUpdated {
+                ids: vec![track.id.clone()],
+            }],
+            Self::RemoveMotionTrack { track_id } => vec![EngineEvent::TracksUpdated {
+                ids: vec![track_id.clone()],
+            }],
+            Self::SetVariable { name, .. } | Self::RemoveVariable { name } => {
+                vec![EngineEvent::VariablesUpdated {
+                    names: vec![name.clone()],
+                }]
+            }
+            Self::DefineExpression { id, .. } | Self::RemoveExpression { id } => {
+                vec![EngineEvent::ExpressionsUpdated { ids: vec![*id] }]
+            }
+            Self::AddConstraint { constraint } => vec![EngineEvent::ConstraintsUpdated {
+                ids: vec![constraint.id],
+            }],
+            Self::RemoveConstraint { id } => {
+                vec![EngineEvent::ConstraintsUpdated { ids: vec![*id] }]
+            }
+            Self::SetConstraintEnabled { id, .. } => {
+                vec![EngineEvent::ConstraintsUpdated { ids: vec![*id] }]
+            }
+            Self::BeginDrag { node_id } => vec![EngineEvent::DragStarted { node_id: *node_id }],
+            // The intent of a pointer sample: this node moved. The engine emits
+            // the full set (dragged node + everything the constraints pulled)
+            // from the solve's own dirty set.
+            Self::UpdateDrag { node_id, .. } => vec![EngineEvent::NodesUpdated {
+                ids: vec![*node_id],
+            }],
+            Self::EndDrag { node_id } => vec![EngineEvent::DragEnded { node_id: *node_id }],
+            // The operation's *inputs* are announced too: the result is derived
+            // geometry, and a UI that already knows the sources can decide how
+            // much of the scene it must re-read.
+            Self::ApplyOperation { id, inputs, .. } => vec![
+                EngineEvent::OperationsUpdated { ids: vec![*id] },
+                EngineEvent::NodesUpdated {
+                    ids: inputs.clone(),
+                },
+                EngineEvent::OrderChanged,
+            ],
+            Self::RemoveOperation { id } => vec![
+                EngineEvent::OperationsUpdated { ids: vec![*id] },
+                EngineEvent::NodesRemoved { ids: vec![*id] },
+                EngineEvent::OrderChanged,
+            ],
+            Self::SetOperationEnabled { id, .. } => {
+                vec![EngineEvent::OperationsUpdated { ids: vec![*id] }]
+            }
+            // A procedural change dirties its own node; the pass then
+            // propagates along the chain and the readers of the changed ports
+            // (Task 7.0), exactly as an operation announces itself before the
+            // geometry it produces arrives in `Dirty`.
+            Self::AddProceduralNode { node } => vec![
+                EngineEvent::ProceduralUpdated { ids: vec![node.id] },
+                EngineEvent::OrderChanged,
+            ],
+            Self::RemoveProceduralNode { id } => vec![
+                EngineEvent::ProceduralUpdated { ids: vec![*id] },
+                EngineEvent::NodesRemoved { ids: vec![*id] },
+                EngineEvent::OrderChanged,
+            ],
+            Self::ConnectProcedural { node_id, .. }
+            | Self::DisconnectProcedural { node_id, .. }
+            | Self::SetProceduralOperand { node_id, .. } => vec![EngineEvent::ProceduralUpdated {
+                ids: vec![*node_id],
+            }],
+            Self::SetProceduralEnabled { id, .. } => {
+                vec![EngineEvent::ProceduralUpdated { ids: vec![*id] }]
+            }
+            // A paint rewrite is a *style* change on one node: the geometry is
+            // untouched, but the node must re-evaluate (its appearance stack is
+            // resolved there) — so the event is the ordinary `NodesUpdated`.
+            Self::SetAppearances { node_id, .. } | Self::RenameNode { id: node_id, .. } => {
+                vec![EngineEvent::NodesUpdated {
+                    ids: vec![*node_id],
+                }]
+            }
+            // **RULE 4.** The eye and the padlock publish a flags event that the
+            // dependency graph deliberately ignores: no slot re-resolves, no
+            // mesh is rebuilt. The renderer is the listener.
+            Self::SetNodeVisible { id, .. } | Self::SetNodeLocked { id, .. } => {
+                vec![EngineEvent::NodeFlagsChanged { ids: vec![*id] }]
+            }
+            Self::CreateLayer { id, .. } => vec![EngineEvent::LayersUpdated { ids: vec![*id] }],
+            Self::DeleteLayer { id } => vec![EngineEvent::LayersUpdated { ids: vec![*id] }],
+            Self::RenameLayer { id, .. }
+            | Self::SetLayerVisible { id, .. }
+            | Self::SetLayerLocked { id, .. } => {
+                vec![EngineEvent::LayersUpdated { ids: vec![*id] }]
+            }
+            // Moving a layer, moving a node, or re-homing one all change the
+            // **draw order**, which the scene re-reads without re-evaluating
+            // anything: `LayerOrderChanged` carries no geometry.
+            Self::ReorderLayer { id, .. } => vec![
+                EngineEvent::LayersUpdated { ids: vec![*id] },
+                EngineEvent::LayerOrderChanged,
+            ],
+            Self::AssignNodeToLayer { node_id, layer } => vec![
+                EngineEvent::LayersUpdated { ids: vec![*layer] },
+                EngineEvent::NodeFlagsChanged {
+                    ids: vec![*node_id],
+                },
+                EngineEvent::LayerOrderChanged,
+            ],
+            Self::DetachNodeFromLayers { node_id } => vec![
+                EngineEvent::NodeFlagsChanged {
+                    ids: vec![*node_id],
+                },
+                EngineEvent::LayerOrderChanged,
+            ],
+            // A move is a *presentation* change: membership moved, no value did.
+            // The node is named so the renderer re-reads its row (its origin and
+            // selection flag are unchanged, but its sibling differs), and no
+            // `Dirty` is emitted — which is RULE 4's bar for "does not
+            // re-evaluate", now applied to the tree as well as the eye.
+            Self::SetNodeParent { id, .. } => vec![
+                EngineEvent::NodeFlagsChanged { ids: vec![*id] },
+                EngineEvent::LayerOrderChanged,
+            ],
+            Self::CreateArtboard { id, .. }
+            | Self::RenameArtboard { id, .. }
+            | Self::SetArtboardBounds { id, .. }
+            | Self::SetArtboardBackground { id, .. }
+            | Self::SetActiveArtboard { id } => {
+                vec![EngineEvent::ArtboardsUpdated { ids: vec![*id] }]
+            }
+            Self::DeleteArtboard { id } => vec![
+                EngineEvent::ArtboardsUpdated { ids: vec![*id] },
+                EngineEvent::LayerOrderChanged,
+            ],
+            Self::SetActiveLayer { id } => vec![EngineEvent::LayersUpdated { ids: vec![*id] }],
+            Self::Batch { commands } => {
+                let mut events = Vec::new();
+                for cmd in commands {
+                    for event in cmd.preview_events() {
+                        if !events.contains(&event) {
+                            events.push(event);
+                        }
+                    }
+                }
+                events
+            }
+        }
+    }
+
+    /// Apply the command, returning its exact inverse for the undo stack.
+    pub fn apply(&self, doc: &mut Document) -> Result<Command, VectraError> {
+        match self {
+            Self::CreateNode {
+                id,
+                kind,
+                name,
+                index,
+            } => {
+                let node = Node::new(
+                    *id,
+                    name.clone().unwrap_or_else(|| kind.tag().to_string()),
+                    kind.clone(),
+                );
+                doc.insert_node(node, *index)?;
+                Ok(Self::DeleteNode { id: *id })
+            }
+            Self::DeleteNode { id } => {
+                // Where the node sat on its layer, and in which container,
+                // captured *before* the removal: undoing a delete must put it
+                // back in the same place on the same layer, not on whichever
+                // layer happens to be active later.
+                let membership = doc.layers.layer_of(*id).map(|(layer, _)| layer.id);
+                let previous_parent = doc.parent_of(*id);
+                let previous_index = doc.sibling_index(*id, previous_parent);
+                let (node, index) = doc.remove_node(*id)?;
+                // A deleted node must not linger in a layer's contents (RULE 1):
+                // the id would survive a flatten that filters by existence today
+                // and confuse `layer_of` tomorrow.
+                doc.layers.detach(*id);
+                // A deleted node must not leave a dangling rule behind, and the
+                // undo of the delete restores those rules with the node.
+                let withdrawn = doc.constraints.remove_targeting(*id);
+                let mut restore = vec![Self::CreateNode {
+                    id: node.id,
+                    kind: node.kind,
+                    name: Some(node.name),
+                    index: Some(index),
+                }];
+                // Layer membership first, then the position *in its container*
+                // — the pair is what makes undo of a delete invisible in the
+                // panel as well as on the canvas. The position is the node's
+                // sibling index, not its slot in the layer's list: for a member
+                // of a group those are different numbers, and restoring the
+                // layer slot would leave the node at the group's top level
+                // instead of where it was among its siblings. (`SetNodeParent`
+                // then does both jobs: the row's place in its container, and the
+                // block's place in the layer's list.)
+                if let Some(layer) = membership {
+                    restore.push(Self::AssignNodeToLayer {
+                        node_id: node.id,
+                        layer,
+                    });
+                    restore.push(Self::SetNodeParent {
+                        id: node.id,
+                        parent: previous_parent,
+                        index: previous_index,
+                    });
+                }
+                restore.extend(
+                    withdrawn
+                        .into_iter()
+                        .map(|constraint| Self::AddConstraint { constraint }),
+                );
+                // An operation whose input just vanished has no shape to read:
+                // it is withdrawn with the node and restored with it, exactly
+                // like the constraints above. Its *other* inputs are untouched.
+                let orphaned = doc
+                    .operations
+                    .affected_by(&[*id])
+                    .into_iter()
+                    .filter_map(|op_id| doc.operations.remove(op_id));
+                restore.extend(orphaned.map(|op| Self::ApplyOperation {
+                    id: op.id,
+                    kind: op.kind,
+                    inputs: op.inputs,
+                }));
+                // The same discipline for the procedural graph: a `Source` node
+                // whose subject just vanished has nothing to read, so it is
+                // withdrawn with the node (and restored with it) — including
+                // the wires other nodes had into it. A *chain* node that merely
+                // loses its upstream wire is not withdrawn: it keeps its
+                // record and reports a typed diagnostic until it is rewired.
+                let orphaned_procedural = doc.procedural.sources_referencing(*id);
+                for orphan in orphaned_procedural {
+                    let Some(removed) = doc.procedural.remove(orphan) else {
+                        continue;
+                    };
+                    restore.push(Self::AddProceduralNode { node: removed.node });
+                    restore.extend(removed.incoming.into_iter().map(|wire| {
+                        Self::ConnectProcedural {
+                            node_id: wire.node_id,
+                            port: wire.port,
+                            from: wire.from,
+                        }
+                    }));
+                }
+                Ok(Self::batch(restore))
+            }
+            Self::SetParameter {
+                node_id,
+                property,
+                value,
+            } => {
+                // Before the mutation, like every other gate: a refused command
+                // leaves the document byte-identical. Only a *geometry* slot can
+                // close a loop through a shape — see
+                // `Document::property_feeds_geometry`.
+                if Node::property_feeds_geometry(property) {
+                    if let Some(reference) = crate::procedural::param_procedural_ref(value) {
+                        validate_procedural_cycle(doc, *node_id, reference)?;
+                    }
+                } else if let Some(reference) = crate::procedural::param_procedural_ref(value) {
+                    // Paint still has to *exist*: a port nobody publishes is a
+                    // dangling reference, which the port-type gate below catches
+                    // for wires and `ResolveError::ProceduralPortUnavailable`
+                    // catches at read time. Nothing to add here.
+                    let _ = reference;
+                }
+                let node = doc.get_node_mut(*node_id)?;
+                let old = node.set_param(property, value.clone())?;
+                Ok(Self::SetParameter {
+                    node_id: *node_id,
+                    property: property.clone(),
+                    value: old,
+                })
+            }
+            Self::SetPath {
+                id,
+                start,
+                segments,
+            } => {
+                // Read the previous geometry first: the inverse is the same
+                // command carrying it, which is what makes undo of a drawing
+                // gesture exact (see the variant's own docs).
+                let node = doc.get_node_mut(*id)?;
+                let NodeKind::Path {
+                    start: old_start,
+                    segments: old_segments,
+                } = &mut node.kind
+                else {
+                    return Err(VectraError::UnknownProperty {
+                        node_id: *id,
+                        node_kind: node.kind.tag().to_string(),
+                        property: "segments".to_string(),
+                    });
+                };
+                let previous_start = std::mem::replace(old_start, start.clone());
+                let previous_segments = std::mem::replace(old_segments, segments.clone());
+                Ok(Self::SetPath {
+                    id: *id,
+                    start: previous_start,
+                    segments: previous_segments,
+                })
+            }
+            Self::SetVariable { name, value } => {
+                let old = doc.set_variable(name.clone(), *value)?;
+                match old {
+                    Some(v) => Ok(Self::SetVariable {
+                        name: name.clone(),
+                        value: v,
+                    }),
+                    None => Ok(Self::RemoveVariable { name: name.clone() }),
+                }
+            }
+            Self::RemoveVariable { name } => {
+                let old = doc.remove_variable(name)?;
+                Ok(Self::SetVariable {
+                    name: name.clone(),
+                    value: old,
+                })
+            }
+            Self::DefineExpression { id, source } => {
+                let old = doc.define_expression(*id, source.clone());
+                match old {
+                    Some(previous) => Ok(Self::DefineExpression {
+                        id: *id,
+                        source: previous,
+                    }),
+                    None => Ok(Self::RemoveExpression { id: *id }),
+                }
+            }
+            Self::RemoveExpression { id } => {
+                let old = doc.remove_expression(*id)?;
+                Ok(Self::DefineExpression {
+                    id: *id,
+                    source: old,
+                })
+            }
+            Self::AddConstraint { constraint } => {
+                doc.constraints.insert(constraint.clone())?;
+                Ok(Self::RemoveConstraint { id: constraint.id })
+            }
+            Self::RemoveConstraint { id } => {
+                let removed = doc
+                    .constraints
+                    .remove(*id)
+                    .ok_or(VectraError::ConstraintNotFound(*id))?;
+                Ok(Self::AddConstraint {
+                    constraint: removed,
+                })
+            }
+            Self::SetConstraintEnabled { id, enabled } => {
+                let constraint = doc
+                    .constraints
+                    .get_mut(*id)
+                    .ok_or(VectraError::ConstraintNotFound(*id))?;
+                let previous = constraint.enabled;
+                constraint.enabled = *enabled;
+                Ok(Self::SetConstraintEnabled {
+                    id: *id,
+                    enabled: previous,
+                })
+            }
+            Self::BeginDrag { node_id } | Self::EndDrag { node_id } => {
+                // Session bookkeeping, not a document mutation: validating here
+                // keeps the command meaningful even if it is ever applied
+                // outside the engine's drag path.
+                let node = doc.get_node(*node_id)?;
+                if node.position_slots().is_none() {
+                    return Err(VectraError::not_draggable(*node_id));
+                }
+                Ok(Self::batch_commands(Vec::new()))
+            }
+            Self::UpdateDrag { node_id, x, y } => {
+                let node = doc.get_node_mut(*node_id)?;
+                let Some((xs, ys)) = node.position_slots() else {
+                    return Err(VectraError::not_draggable(*node_id));
+                };
+                let old_x = node.set_param(xs, ParamValue::Float(Parameter::Literal(*x)))?;
+                let old_y = node.set_param(ys, ParamValue::Float(Parameter::Literal(*y)))?;
+                // Reversed: undoing a batch unwinds it last-in-first-out.
+                Ok(Self::batch_commands(vec![
+                    Self::SetParameter {
+                        node_id: *node_id,
+                        property: ys.to_string(),
+                        value: old_y,
+                    },
+                    Self::SetParameter {
+                        node_id: *node_id,
+                        property: xs.to_string(),
+                        value: old_x,
+                    },
+                ]))
+            }
+            Self::BindMotion {
+                node_id,
+                property,
+                binding,
+            } => {
+                validate_binding(doc, *node_id, property, binding)?;
+                let node = doc.get_node_mut(*node_id)?;
+                let old = node.set_param(
+                    property,
+                    ParamValue::Float(Parameter::Animated(binding.clone())),
+                )?;
+                Ok(Self::SetParameter {
+                    node_id: *node_id,
+                    property: property.clone(),
+                    value: old,
+                })
+            }
+            Self::SetMotionTrack { track } => {
+                let previous = doc.motion.insert(track.clone())?;
+                Ok(match previous {
+                    Some(previous) => Self::SetMotionTrack { track: previous },
+                    None => Self::RemoveMotionTrack {
+                        track_id: track.id.clone(),
+                    },
+                })
+            }
+            Self::RemoveMotionTrack { track_id } => {
+                let removed = doc.motion.remove(track_id).ok_or_else(|| {
+                    VectraError::command(format!("motion track {track_id} does not exist"))
+                })?;
+                Ok(Self::SetMotionTrack { track: removed })
+            }
+            Self::ApplyOperation { id, kind, inputs } => {
+                OperationNode::validate(*id, kind, inputs)?;
+                // An operation's parameters are slots too: a mirror plane may
+                // read a port, and the operation's own output is a shape a
+                // `source` node can read — the same disguised loop.
+                let mut cycle: Option<VectraError> = None;
+                kind.for_each_float_param(|param| {
+                    if let Parameter::Procedural(reference) = param {
+                        if let Err(error) = validate_procedural_cycle(doc, *id, reference) {
+                            cycle.get_or_insert(error);
+                        }
+                    }
+                });
+                if let Some(error) = cycle {
+                    return Err(error);
+                }
+                for input in inputs {
+                    // The sources must exist — a virtual shape over a missing
+                    // node is not a shape. Operation-on-operation nesting is
+                    // Phase 2 (see the module note in `operation.rs`).
+                    doc.get_node(*input)?;
+                }
+                if doc.operations.contains(*id) {
+                    return Err(VectraError::command(format!(
+                        "operation {id} already exists"
+                    )));
+                }
+                let node = OperationNode::new(*id, kind.clone(), inputs.clone());
+                doc.operations.insert(node);
+                Ok(Self::RemoveOperation { id: *id })
+            }
+            Self::RemoveOperation { id } => {
+                let removed = doc
+                    .operations
+                    .remove(*id)
+                    .ok_or(VectraError::OperationNotFound(*id))?;
+                // Exact inverse: the same id, kind and inputs (RULE 1 — nothing
+                // about the sources is part of this record).
+                Ok(Self::ApplyOperation {
+                    id: removed.id,
+                    kind: removed.kind,
+                    inputs: removed.inputs,
+                })
+            }
+            Self::SetOperationEnabled { id, enabled } => {
+                let node = doc
+                    .operations
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(VectraError::OperationNotFound(*id))?;
+                let previous = node.enabled;
+                node.enabled = *enabled;
+                Ok(Self::SetOperationEnabled {
+                    id: *id,
+                    enabled: previous,
+                })
+            }
+            Self::AddProceduralNode { node } => {
+                if doc.procedural.contains(node.id) {
+                    return Err(VectraError::command(format!(
+                        "procedural node {} already exists",
+                        node.id
+                    )));
+                }
+                // A record that arrives without a name is named here, from its
+                // kind — the same name `ProceduralNode::new` would have given it,
+                // so the engine's own default and a remote control's omission
+                // produce the same document.
+                let mut node = node.clone();
+                if node.name.is_empty() {
+                    node.name = node.kind.describe();
+                }
+                node.validate(&doc.procedural)?;
+                doc.procedural.insert(node.clone());
+                Ok(Self::RemoveProceduralNode { id: node.id })
+            }
+            Self::RemoveProceduralNode { id } => {
+                let removed = doc.procedural.remove(*id).ok_or_else(|| {
+                    VectraError::command(format!("procedural node {id} is not registered"))
+                })?;
+                // Exact inverse: the record, then every wire other nodes had
+                // *into* it (the wires out of it travel inside the record).
+                let mut restore = vec![Self::AddProceduralNode { node: removed.node }];
+                restore.extend(
+                    removed
+                        .incoming
+                        .into_iter()
+                        .map(|wire| Self::ConnectProcedural {
+                            node_id: wire.node_id,
+                            port: wire.port,
+                            from: wire.from,
+                        }),
+                );
+                Ok(Self::batch(restore))
+            }
+            Self::ConnectProcedural {
+                node_id,
+                port,
+                from,
+            } => {
+                let node = doc
+                    .procedural
+                    .get(*node_id)
+                    .ok_or_else(|| unknown_procedural(*node_id))?;
+                let mut candidate = node.clone();
+                candidate.wires.insert(port.clone(), from.clone());
+                candidate.validate(&doc.procedural)?;
+                let previous = doc
+                    .procedural
+                    .get_mut(*node_id)
+                    .expect("checked above")
+                    .wires
+                    .insert(port.clone(), from.clone());
+                Ok(match previous {
+                    Some(previous) => Self::ConnectProcedural {
+                        node_id: *node_id,
+                        port: port.clone(),
+                        from: previous,
+                    },
+                    None => Self::DisconnectProcedural {
+                        node_id: *node_id,
+                        port: port.clone(),
+                    },
+                })
+            }
+            Self::DisconnectProcedural { node_id, port } => {
+                let node = doc
+                    .procedural
+                    .get_mut(*node_id)
+                    .ok_or_else(|| unknown_procedural(*node_id))?;
+                let removed = node.wires.remove(port).ok_or_else(|| {
+                    VectraError::command(format!(
+                        "procedural node {node_id} has no wire on port '{port}'"
+                    ))
+                })?;
+                Ok(Self::ConnectProcedural {
+                    node_id: *node_id,
+                    port: port.clone(),
+                    from: removed,
+                })
+            }
+            Self::SetProceduralOperand {
+                node_id,
+                port,
+                value,
+            } => {
+                let node = doc
+                    .procedural
+                    .get(*node_id)
+                    .ok_or_else(|| unknown_procedural(*node_id))?;
+                let mut candidate = node.clone();
+                candidate.operands.insert(port.clone(), value.clone());
+                candidate.validate(&doc.procedural)?;
+                // The inverse writes the *effective* previous value: the stored
+                // operand, or the kind's default when the record carried none
+                // (which is what evaluation would have used).
+                let previous = node.operand(port).unwrap_or_else(|| value.clone());
+                doc.procedural
+                    .get_mut(*node_id)
+                    .expect("checked above")
+                    .operands
+                    .insert(port.clone(), value.clone());
+                Ok(Self::SetProceduralOperand {
+                    node_id: *node_id,
+                    port: port.clone(),
+                    value: previous,
+                })
+            }
+            Self::SetProceduralEnabled { id, enabled } => {
+                let node = doc
+                    .procedural
+                    .get_mut(*id)
+                    .ok_or_else(|| unknown_procedural(*id))?;
+                let previous = node.enabled;
+                node.enabled = *enabled;
+                Ok(Self::SetProceduralEnabled {
+                    id: *id,
+                    enabled: previous,
+                })
+            }
+            // ── appearance (Task 10.2 RULE 3) ────────────────────────────
+            Self::SetAppearances {
+                node_id,
+                appearances,
+            } => {
+                let node = doc
+                    .nodes
+                    .get_mut(node_id)
+                    .ok_or(VectraError::NodeNotFound(*node_id))?;
+                let previous = std::mem::replace(&mut node.style.appearances, appearances.clone());
+                Ok(Self::SetAppearances {
+                    node_id: *node_id,
+                    appearances: previous,
+                })
+            }
+            // ── presentation flags (Task 10.2 RULE 4) ────────────────────
+            Self::SetNodeVisible { id, visible } => {
+                let node = doc
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(VectraError::NodeNotFound(*id))?;
+                let previous = node.visible;
+                node.visible = *visible;
+                Ok(Self::SetNodeVisible {
+                    id: *id,
+                    visible: previous,
+                })
+            }
+            Self::SetNodeLocked { id, locked } => {
+                let node = doc
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(VectraError::NodeNotFound(*id))?;
+                let previous = node.locked;
+                node.locked = *locked;
+                Ok(Self::SetNodeLocked {
+                    id: *id,
+                    locked: previous,
+                })
+            }
+            Self::RenameNode { id, name } => {
+                let node = doc
+                    .nodes
+                    .get_mut(id)
+                    .ok_or(VectraError::NodeNotFound(*id))?;
+                let previous = std::mem::replace(&mut node.name, name.clone());
+                Ok(Self::RenameNode {
+                    id: *id,
+                    name: previous,
+                })
+            }
+            // ── layers (Task 10.2 RULE 1) ─────────────────────────────────
+            Self::CreateLayer {
+                id,
+                name,
+                index,
+                artboard,
+            } => {
+                // The layer joins the active board's stack at the top (or at the
+                // requested index): the record keeps its own identity, so a later
+                // move between boards is a re-listing, never a re-creation.
+                let record = LayerRecord::new(*id, name.clone());
+                let board = artboard.or_else(|| doc.artboards.active_id());
+                if !doc.layers.insert(record, *index) {
+                    return Err(VectraError::LayerAlreadyExists(*id));
+                }
+                if let Some(board) = board {
+                    doc.attach_layer_to_artboard(*id, Some(board));
+                    if let Some(board_record) = doc.artboards.get_mut(&board) {
+                        if let Some(at) = *index {
+                            let last = board_record.layers.len().saturating_sub(1);
+                            let layer = board_record.layers.remove(last);
+                            board_record.layers.insert(at.min(last), layer);
+                        }
+                    }
+                }
+                doc.active_layer = Some(*id);
+                doc.resync_order_from_layers();
+                Ok(Self::DeleteLayer { id: *id })
+            }
+            Self::DeleteLayer { id } => {
+                let record = doc
+                    .layers
+                    .remove(id)
+                    .ok_or(VectraError::LayerNotFound(*id))?;
+                for board in &mut doc.artboards.boards {
+                    board.layers.retain(|layer| layer != id);
+                }
+                if doc.active_layer == Some(*id) {
+                    doc.active_layer = None;
+                }
+                // The nodes are *not* deleted: they become unassigned and keep
+                // drawing (see the command's docs).
+                doc.resync_order_from_layers();
+                Ok(Self::CreateLayer {
+                    id: record.id,
+                    name: record.name,
+                    index: None,
+                    artboard: None,
+                })
+            }
+            Self::RenameLayer { id, name } => {
+                let layer = doc
+                    .layers
+                    .get_mut(id)
+                    .ok_or(VectraError::LayerNotFound(*id))?;
+                let previous = std::mem::replace(&mut layer.name, name.clone());
+                Ok(Self::RenameLayer {
+                    id: *id,
+                    name: previous,
+                })
+            }
+            Self::SetLayerVisible { id, visible } => {
+                let layer = doc
+                    .layers
+                    .get_mut(id)
+                    .ok_or(VectraError::LayerNotFound(*id))?;
+                let previous = layer.visible;
+                layer.visible = *visible;
+                // The layer's nodes change their *effective* visibility; the
+                // renderer re-reads the flags and skips their draws. Nothing
+                // reaches the evaluator (RULE 4).
+                Ok(Self::SetLayerVisible {
+                    id: *id,
+                    visible: previous,
+                })
+            }
+            Self::SetLayerLocked { id, locked } => {
+                let layer = doc
+                    .layers
+                    .get_mut(id)
+                    .ok_or(VectraError::LayerNotFound(*id))?;
+                let previous = layer.locked;
+                layer.locked = *locked;
+                Ok(Self::SetLayerLocked {
+                    id: *id,
+                    locked: previous,
+                })
+            }
+            Self::ReorderLayer { id, index } => {
+                // One call, because a layer's position lives in two places: the
+                // registry the panel lists and the artboard stack the draw order
+                // is flattened from (see `Document::reorder_layer`).
+                let previous = doc
+                    .reorder_layer(id, *index)
+                    .ok_or(VectraError::LayerNotFound(*id))?;
+                Ok(Self::ReorderLayer {
+                    id: *id,
+                    index: previous,
+                })
+            }
+            Self::AssignNodeToLayer { node_id, layer } => {
+                if !doc.nodes.contains_key(node_id) {
+                    return Err(VectraError::NodeNotFound(*node_id));
+                }
+                if doc.layers.get(layer).is_none() {
+                    return Err(VectraError::LayerNotFound(*layer));
+                }
+                let previous = doc.layers.layer_of(*node_id).map(|(layer, _)| layer.id);
+                doc.layers.detach(*node_id);
+                if let Some(target) = doc.layers.get_mut(layer) {
+                    target.children.push(*node_id);
+                }
+                doc.resync_order_from_layers();
+                // The inverse returns the node to where it *was*: the same layer
+                // (it is a real move within the container) or, when it had no
+                // layer at all, "no layer" — which is its own command, because
+                // "assign to nothing" is not something an assign can say.
+                Ok(match previous {
+                    Some(previous) => Self::AssignNodeToLayer {
+                        node_id: *node_id,
+                        layer: previous,
+                    },
+                    None => Self::DetachNodeFromLayers { node_id: *node_id },
+                })
+            }
+            Self::DetachNodeFromLayers { node_id } => {
+                let previous = doc
+                    .layers
+                    .detach(*node_id)
+                    .ok_or(VectraError::NodeNotInAnyLayer(*node_id))?;
+                doc.resync_order_from_layers();
+                Ok(Self::AssignNodeToLayer {
+                    node_id: *node_id,
+                    layer: previous,
+                })
+            }
+            Self::SetNodeParent { id, parent, index } => {
+                // Which layer holds the node **before** the move. A move can
+                // change that on its own: a layer lists its blocks, so a subtree
+                // lives in exactly one layer, and moving a node into a group that
+                // belongs to another layer carries the node into *that* layer.
+                // The inverse has to put that back too — restoring parent and
+                // position alone leaves the artwork in the group's layer, which
+                // is the fidelity break the tree laws found on a group made from
+                // a selection that spanned two layers.
+                let previous_layer = doc.layers.layer_of(*id).map(|(record, _)| record.id);
+                match doc.set_parent(*id, *parent, *index)? {
+                    // The exact inverse is the same move, back where it came
+                    // from: parent, then position — one entry, because one
+                    // gesture made it. When the move crossed a layer, that is one
+                    // more fact, and it rides in the same entry.
+                    Some((previous_parent, previous_index)) => {
+                        let restore = Self::SetNodeParent {
+                            id: *id,
+                            parent: previous_parent,
+                            index: previous_index,
+                        };
+                        let moved_layer = doc.layers.layer_of(*id).map(|(record, _)| record.id);
+                        Ok(
+                            match previous_layer.filter(|layer| Some(*layer) != moved_layer) {
+                                Some(layer) => Self::batch(vec![
+                                    Self::AssignNodeToLayer {
+                                        node_id: *id,
+                                        layer,
+                                    },
+                                    restore,
+                                ]),
+                                None => restore,
+                            },
+                        )
+                    }
+                    // **Already there**: the move was satisfied before it ran, so
+                    // it changed nothing and its inverse is itself. Not an error:
+                    // a redo that lands the document where it already is must be as
+                    // quiet as the drag that produced it (`NodeNotFound` here was
+                    // a real defect, found by the round-trip law).
+                    None => Ok(Self::SetNodeParent {
+                        id: *id,
+                        parent: *parent,
+                        index: *index,
+                    }),
+                }
+            }
+            // ── artboards (Task 10.2 RULE 2) ─────────────────────────────
+            Self::CreateArtboard {
+                id,
+                name,
+                x,
+                y,
+                width,
+                height,
+                background,
+            } => {
+                let mut record = ArtboardRecord::new(*id, name.clone(), *x, *y, *width, *height);
+                record.background = *background;
+                if !doc.artboards.insert(record, None) {
+                    return Err(VectraError::ArtboardAlreadyExists(*id));
+                }
+                // A new board is the one you are **on** (RULE 2): "+ board" is a
+                // move onto the new paper, which is what makes the layer the
+                // designer creates next — and the shape after that — land on it
+                // rather than on whatever board was active before. Undo falls
+                // back through the registry's own "first board" rule
+                // ([`ArtboardRegistry::remove`]), so the flag is never dangling.
+                doc.artboards.active = Some(*id);
+                Ok(Self::DeleteArtboard { id: *id })
+            }
+            Self::DeleteArtboard { id } => {
+                let record = doc
+                    .artboards
+                    .remove(id)
+                    .ok_or(VectraError::ArtboardNotFound(*id))?;
+                doc.resync_order_from_layers();
+                Ok(Self::CreateArtboard {
+                    id: record.id,
+                    name: record.name,
+                    x: record.x,
+                    y: record.y,
+                    width: record.width,
+                    height: record.height,
+                    background: record.background,
+                })
+            }
+            Self::RenameArtboard { id, name } => {
+                let board = doc
+                    .artboards
+                    .get_mut(id)
+                    .ok_or(VectraError::ArtboardNotFound(*id))?;
+                let previous = std::mem::replace(&mut board.name, name.clone());
+                Ok(Self::RenameArtboard {
+                    id: *id,
+                    name: previous,
+                })
+            }
+            Self::SetArtboardBounds {
+                id,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let board = doc
+                    .artboards
+                    .get_mut(id)
+                    .ok_or(VectraError::ArtboardNotFound(*id))?;
+                let previous = (board.x, board.y, board.width, board.height);
+                board.x = *x;
+                board.y = *y;
+                board.width = *width;
+                board.height = *height;
+                Ok(Self::SetArtboardBounds {
+                    id: *id,
+                    x: previous.0,
+                    y: previous.1,
+                    width: previous.2,
+                    height: previous.3,
+                })
+            }
+            Self::SetArtboardBackground { id, background } => {
+                let board = doc
+                    .artboards
+                    .get_mut(id)
+                    .ok_or(VectraError::ArtboardNotFound(*id))?;
+                let previous = std::mem::replace(&mut board.background, *background);
+                Ok(Self::SetArtboardBackground {
+                    id: *id,
+                    background: previous,
+                })
+            }
+            Self::SetActiveArtboard { id } => {
+                if doc.artboards.get(id).is_none() {
+                    return Err(VectraError::ArtboardNotFound(*id));
+                }
+                let previous = doc.artboards.active;
+                doc.artboards.active = Some(*id);
+                // The board the designer just switched to comes forward, so new
+                // artwork lands on top of the artwork of the previous board.
+                doc.raise_artboard(id);
+                let restore = previous
+                    .filter(|previous| doc.artboards.get(previous).is_some())
+                    .unwrap_or(*id);
+                Ok(Self::SetActiveArtboard { id: restore })
+            }
+            Self::SetActiveLayer { id } => {
+                if doc.layers.get(id).is_none() {
+                    return Err(VectraError::LayerNotFound(*id));
+                }
+                let previous = doc.active_layer;
+                doc.active_layer = Some(*id);
+                Ok(Self::SetActiveLayer {
+                    id: previous.unwrap_or(*id),
+                })
+            }
+            Self::Batch { commands } => {
+                let mut inverses = Vec::with_capacity(commands.len());
+                for cmd in commands {
+                    inverses.push(cmd.apply(doc)?);
+                }
+                // Reversed: undoing a batch must unwind it last-in-first-out.
+                inverses.reverse();
+                Ok(Self::batch(inverses))
+            }
+        }
+    }
+
+    /// Flatten nested batches, so a batch's inverse is always a flat list.
+    fn batch(commands: Vec<Command>) -> Command {
+        batch_from(commands)
+    }
+
+    /// Compose commands into one user action: children apply in order, and the
+    /// inverse unwinds them last-in-first-out.
+    ///
+    /// Used by the engine to fold a solver pass's writes into the history entry
+    /// of the command that caused them, so one undo reverts both.
+    pub fn batch_commands(commands: Vec<Command>) -> Command {
+        batch_from(commands)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, VectraError> {
+        serde_json::from_str(json).map_err(|e| VectraError::Serialization(e.to_string()))
+    }
+
+    pub fn to_json(&self) -> Result<String, VectraError> {
+        serde_json::to_string(self).map_err(|e| VectraError::Serialization(e.to_string()))
+    }
+}
+
+/// Flatten nested batches into one composite command (1-length batches and
+/// empty batches collapse to their content). Inverse-returning, so it is safe
+/// to store in a history entry.
+pub(crate) fn batch_from(commands: Vec<Command>) -> Command {
+    if commands.len() == 1 {
+        return commands.into_iter().next().expect("len checked");
+    }
+    let mut flat = Vec::with_capacity(commands.len());
+    for cmd in commands {
+        match cmd {
+            Command::Batch { commands } => flat.extend(commands),
+            other => flat.push(other),
+        }
+    }
+    Command::Batch { commands: flat }
+}
+
+/// Engine → UI notifications (MES §16, step 4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum EngineEvent {
+    NodesUpdated {
+        ids: Vec<NodeId>,
+    },
+    NodesRemoved {
+        ids: Vec<NodeId>,
+    },
+    OrderChanged,
+    VariablesUpdated {
+        names: Vec<VariableId>,
+    },
+    ExpressionsUpdated {
+        ids: Vec<ExpressionId>,
+    },
+    /// Constraints were added, removed, enabled or disabled (Task 3.1).
+    ConstraintsUpdated {
+        ids: Vec<ConstraintId>,
+    },
+    /// Operations were added, removed, enabled or disabled (Task 4.0). The
+    /// virtual node's geometry arrives as its own id in `Dirty`, once the
+    /// operations pass has recomputed it.
+    OperationsUpdated {
+        ids: Vec<OperationId>,
+    },
+    /// A drag gesture opened (Task 3.2) — one line in the log, not one per
+    /// pointer sample.
+    /// Procedural-graph changes (Task 7.0): a node was added, removed, wired,
+    /// rewired, parked or given a new operand. The port values and drawn
+    /// geometry it produces arrive as ids in `Dirty`, once the pass has run.
+    ProceduralUpdated {
+        ids: Vec<NodeId>,
+    },
+    /// Motion-track registry changes (Task 6.0). A track is a *graph vertex*
+    /// (`GraphNode::Track`), so this event dirties exactly the slots that sample
+    /// it — the same discipline variables and expressions already had.
+    TracksUpdated {
+        ids: Vec<TrackId>,
+    },
+    DragStarted {
+        node_id: NodeId,
+    },
+    /// A drag gesture finished; the geometry it produced is already in the
+    /// document and now lives in exactly one history entry.
+    DragEnded {
+        node_id: NodeId,
+    },
+    /// **Presentation flags changed** — a node's eye or padlock (Task 10.2
+    /// RULE 4).
+    ///
+    /// Deliberately *not* a geometry event, and the distinction is the whole
+    /// performance rule: the dependency graph ignores this variant (see
+    /// `DependencyGraph::dirty_ids_for_events`), so nothing re-resolves, nothing
+    /// re-tessellates, and the scene cache is untouched. The **renderer** is what
+    /// listens: it re-reads the flags and skips the node's draws. A hidden layer
+    /// costs one frame of drawing fewer triangles, not a re-evaluation of the
+    /// document.
+    NodeFlagsChanged {
+        ids: Vec<NodeId>,
+    },
+    /// Layer records changed: created, deleted, renamed, re-enabled or
+    /// re-flagged (Task 10.2 RULE 1).
+    LayersUpdated {
+        ids: Vec<LayerId>,
+    },
+    /// A layer or node **moved in the draw order**. Carries no ids: what moved
+    /// is the whole stack, and the scene re-reads its order from the document
+    /// rather than re-evaluating anything.
+    LayerOrderChanged,
+    /// Artboards changed: added, removed, renamed, re-framed, re-coloured, or
+    /// the active board switched (Task 10.2 RULE 2).
+    ArtboardsUpdated {
+        ids: Vec<ArtboardId>,
+    },
+    StackChanged {
+        can_undo: bool,
+        can_redo: bool,
+    },
+    /// Exactly which geometry nodes were re-evaluated for this mutation, and
+    /// whether that was a full or incremental pass (Task 2.2).
+    ///
+    /// Unlike the variants above, this one is *derived*, not an intent: it is
+    /// appended by the engine owner (`vectra-wasm`) after the dependency graph
+    /// has propagated the change, so [`Command::preview_events`] never emits it.
+    /// `ids` is empty for a mutation with no dependents — the visible proof
+    /// that an edit cost nothing to re-render.
+    Dirty {
+        ids: Vec<NodeId>,
+        mode: crate::eval::EvalMode,
+    },
+}
+
+/// One typed message for "no such procedural node", used by every command that
+/// addresses one.
+fn unknown_procedural(id: NodeId) -> VectraError {
+    VectraError::command(format!("procedural node {id} is not registered"))
+}
+
+/// Every port a binding reads, checked against the node it would steer — when
+/// the slot it steers is a geometry slot (`Document::property_feeds_geometry`).
+fn validate_binding_references(
+    doc: &Document,
+    node_id: NodeId,
+    property: &str,
+    binding: &MotionBinding,
+) -> Result<(), VectraError> {
+    if !Node::property_feeds_geometry(property) {
+        return Ok(());
+    }
+    for param in binding.inner_parameters() {
+        if let Parameter::Procedural(reference) = param {
+            validate_procedural_cycle(doc, node_id, reference)?;
+        }
+    }
+    Ok(())
+}
+
+/// RULE 3, the half no operand-shaped check can cover.
+///
+/// The spec's sentence is "a value reference back into the graph is a cycle
+/// wearing a disguise", and it names the *operand* form of it: a procedural
+/// node's `Parameter<f64>` must not read another node's port, because a wire
+/// already expresses dependency inside the graph. But an operand is only one
+/// road back. The other one runs through **geometry**:
+///
+/// ```text
+///   rect.width  ←  ⬡ grid • span     the slot reads a port (legal: it is not
+///                                    read by the grid)
+///   ⬡ source    →  rect              and a source node reads rect's shape
+/// ```
+///
+/// Now flip one slot — let `rect.width` read the output of a node *downstream*
+/// of `rect` — and the loop closes with no port-shaped edge anywhere in it: the
+/// grid's value depends on `rect`, `rect`'s shape depends on the grid's value.
+/// The graph's cycle gate cannot see this (the source→rect relation is a
+/// *geometry* read, deliberately not an edge — see `vectra-dependency`'s
+/// `procedural_edges`), and an accepted loop is not a static wrong answer: the
+/// settle path re-reads a reader and re-runs the chain that reads it, so it
+/// would oscillate once per round instead of converging.
+///
+/// So the boundary asks the question the graph cannot: is `subject` already
+/// upstream of the port it wants to read, through shapes rather than ports?
+/// If it is, the reference is refused here, typed, with nothing mutated — the
+/// same discipline as every other gate in this module.
+fn validate_procedural_cycle(
+    doc: &Document,
+    subject: NodeId,
+    reference: &NodeOutputId,
+) -> Result<(), VectraError> {
+    let closure = doc.procedural_geometry_closure(reference.node);
+    if closure.contains(&subject) {
+        return Err(VectraError::cyclic(format!(
+            "reading {port:?} of procedural node {node} here would close a cycle through geometry: \
+             {subject} is upstream of that port",
+            port = reference.port,
+            node = reference.node,
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a binding that could never resolve, so a bound slot is always
+/// readable. Cheap, boundary-time validation — the same discipline the
+/// expression and constraint gates follow.
+fn validate_binding(
+    doc: &Document,
+    node_id: NodeId,
+    property: &str,
+    binding: &MotionBinding,
+) -> Result<(), VectraError> {
+    match binding {
+        MotionBinding::Spring {
+            stiffness, damping, ..
+        } => {
+            if !stiffness.is_finite() || *stiffness <= 0.0 {
+                return Err(VectraError::command(format!(
+                    "spring stiffness must be positive and finite (got {stiffness})"
+                )));
+            }
+            // Damping must be positive: an undamped spring oscillates forever,
+            // which would make "is the animation idle?" unanswerable and pin the
+            // frame loop at 60 fps for good. See TASK-6.0-DESIGN.md §D2.
+            if !damping.is_finite() || *damping <= 0.0 {
+                return Err(VectraError::command(format!(
+                    "spring damping must be positive and finite (got {damping})"
+                )));
+            }
+            // A binding's inner parameters are slots like any other, so they
+            // carry the same ban: a spring aimed by a port the node feeds is a
+            // cycle wearing a disguise, one level deeper.
+            validate_binding_references(doc, node_id, property, binding)
+        }
+        MotionBinding::KeyframeTrack { track_id, property } => {
+            validate_binding_references(doc, node_id, property, binding)?;
+            let track = doc.motion.get(track_id).ok_or_else(|| {
+                VectraError::command(format!("motion track {track_id} does not exist"))
+            })?;
+            if !track.channels.contains_key(property) {
+                return Err(VectraError::command(format!(
+                    "motion track {track_id} has no channel {property:?} (channels: {})",
+                    track
+                        .channels
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            Ok(())
+        }
+        MotionBinding::StateDriven { state, .. } => {
+            if state.trim().is_empty() {
+                return Err(VectraError::command("state name must not be empty"));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One undoable history entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryEntry {
+    pub forward: Command,
+    pub backward: Command,
+    pub label: String,
+}
+
+/// Bounded undo/redo stack over [`Command`] inverses.
+#[derive(Debug)]
+pub struct CommandStack {
+    undo_stack: Vec<HistoryEntry>,
+    redo_stack: Vec<HistoryEntry>,
+    limit: usize,
+}
+
+impl CommandStack {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    pub fn with_default_limit() -> Self {
+        Self::new(200)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn undo_len(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub fn redo_len(&self) -> usize {
+        self.redo_stack.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
+    /// The command that [`CommandStack::undo`] would apply next, without
+    /// applying it (`None` when the undo stack is empty).
+    ///
+    /// The undo of a command is its *inverse*, so this returns the inverse:
+    /// the exact [`Command`] a caller can dry-run (e.g. the dependency graph's
+    /// cycle pre-check in Task 2.2) before deciding to undo.
+    pub fn peek_undo(&self) -> Option<&Command> {
+        self.undo_stack.last().map(|entry| &entry.backward)
+    }
+
+    /// The command that [`CommandStack::redo`] would re-apply next, without
+    /// applying it (`None` when the redo stack is empty).
+    pub fn peek_redo(&self) -> Option<&Command> {
+        self.redo_stack.last().map(|entry| &entry.forward)
+    }
+
+    /// Label of the undo entry [`CommandStack::undo`] would apply next.
+    pub fn peek_undo_label(&self) -> Option<&str> {
+        self.undo_stack.last().map(|entry| entry.label.as_str())
+    }
+
+    /// Fold `extra` into the top entry's backward command (Task 3.1).
+    ///
+    /// The constraint solver runs *after* a command has been applied, so the
+    /// properties it adjusts as a consequence belong to that same user action.
+    /// Prepending them here means one undo reverts the action **and** everything
+    /// the solver did because of it — an undo is a true pre-image, not a
+    /// half-reverted state. `extra` must therefore be the *inverse* of what the
+    /// solver applied (see `Engine::apply_untracked`).
+    pub fn amend_top_backward(&mut self, extra: Command) {
+        let Some(entry) = self.undo_stack.last_mut() else {
+            return;
+        };
+        if matches!(extra, Command::Batch { ref commands } if commands.is_empty()) {
+            return;
+        }
+        let existing = std::mem::replace(&mut entry.backward, Command::Batch { commands: vec![] });
+        entry.backward = batch_from(vec![extra, existing]);
+    }
+
+    /// Pop the top entry and apply its inverse **without** pushing it onto the
+    /// redo stack.
+    ///
+    /// Used to roll a command back when a post-apply stage rejects the result
+    /// (the solver finding a deep contradiction between required constraints):
+    /// the document returns to its previous state and the stack looks as if the
+    /// command had never been dispatched.
+    pub fn rollback_last(&mut self, doc: &mut Document) -> Result<(), VectraError> {
+        let entry = self.undo_stack.pop().ok_or(VectraError::NothingToUndo)?;
+        entry.backward.apply(doc)?;
+        Ok(())
+    }
+
+    fn stack_event(&self) -> EngineEvent {
+        EngineEvent::StackChanged {
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+        }
+    }
+
+    /// Execute and push. Clears the redo stack. Failing commands push nothing.
+    pub fn execute(
+        &mut self,
+        doc: &mut Document,
+        cmd: Command,
+    ) -> Result<Vec<EngineEvent>, VectraError> {
+        let label = cmd.label();
+        let mut events = cmd.preview_events();
+        let backward = cmd.apply(doc)?;
+        self.undo_stack.push(HistoryEntry {
+            forward: cmd,
+            backward,
+            label,
+        });
+        if self.undo_stack.len() > self.limit {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+        events.push(self.stack_event());
+        Ok(events)
+    }
+
+    /// Record an action whose effects are **already applied** as one history
+    /// entry (Task 3.2).
+    ///
+    /// [`CommandStack::execute`] applies and pushes; a drag gesture is the
+    /// mirror image — the writes land as the pointer moves (through the solver,
+    /// see `Engine::apply_untracked`), and the gesture is pushed *once*, at
+    /// `EndDrag`, with the net movement as its forward command and the exact
+    /// pre-drag state as its backward command. From here on the entry is
+    /// indistinguishable from an executed one.
+    ///
+    /// Does the same bookkeeping as [`CommandStack::execute`]: clears the redo
+    /// stack, trims to the limit, and reports the stack change.
+    pub fn record(&mut self, forward: Command, backward: Command, label: impl Into<String>) {
+        self.undo_stack.push(HistoryEntry {
+            forward,
+            backward,
+            label: label.into(),
+        });
+        if self.undo_stack.len() > self.limit {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self, doc: &mut Document) -> Result<Vec<EngineEvent>, VectraError> {
+        let entry = self.undo_stack.pop().ok_or(VectraError::NothingToUndo)?;
+        let mut events = entry.backward.preview_events();
+        // Applying the backward command must succeed; if the document changed
+        // out-of-band this surfaces as a typed error instead of a corrupt stack.
+        let re_forward = entry.backward.apply(doc)?;
+        self.redo_stack.push(HistoryEntry {
+            forward: entry.forward,
+            backward: re_forward,
+            label: entry.label,
+        });
+        events.push(self.stack_event());
+        Ok(events)
+    }
+
+    pub fn redo(&mut self, doc: &mut Document) -> Result<Vec<EngineEvent>, VectraError> {
+        let entry = self.redo_stack.pop().ok_or(VectraError::NothingToRedo)?;
+        let mut events = entry.forward.preview_events();
+        let backward = entry.forward.apply(doc)?;
+        self.undo_stack.push(HistoryEntry {
+            forward: entry.forward,
+            backward,
+            label: entry.label,
+        });
+        events.push(self.stack_event());
+        Ok(events)
+    }
+}
+
+impl Default for CommandStack {
+    fn default() -> Self {
+        Self::with_default_limit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::{new_expression_id, new_node_id};
+    use crate::param::Parameter;
+
+    fn rect_cmd(id: NodeId) -> Command {
+        Command::CreateNode {
+            id,
+            kind: NodeKind::rectangle(0.0, 0.0, 100.0, 50.0),
+            name: Some("rect".to_string()),
+            index: None,
+        }
+    }
+
+    #[test]
+    fn create_undo_redo_restores_identity() {
+        let mut doc = Document::new();
+        let mut stack = CommandStack::with_default_limit();
+        let id = new_node_id();
+        stack.execute(&mut doc, rect_cmd(id)).unwrap();
+        assert!(doc.get_node(id).is_ok());
+        stack.undo(&mut doc).unwrap();
+        assert!(doc.get_node(id).is_err());
+        stack.redo(&mut doc).unwrap();
+        let node = doc.get_node(id).unwrap();
+        assert_eq!(node.name, "rect");
+    }
+
+    #[test]
+    fn set_parameter_undo_restores_old_value() {
+        let mut doc = Document::new();
+        let mut stack = CommandStack::with_default_limit();
+        let id = new_node_id();
+        stack.execute(&mut doc, rect_cmd(id)).unwrap();
+        stack
+            .execute(
+                &mut doc,
+                Command::SetParameter {
+                    node_id: id,
+                    property: "width".to_string(),
+                    value: ParamValue::Float(Parameter::variable("base")),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            doc.get_node(id).unwrap().get_param("width").unwrap(),
+            ParamValue::Float(Parameter::variable("base"))
+        );
+        stack.undo(&mut doc).unwrap();
+        assert_eq!(
+            doc.get_node(id).unwrap().get_param("width").unwrap(),
+            ParamValue::float_literal(100.0)
+        );
+    }
+
+    #[test]
+    fn failing_command_pushes_nothing() {
+        let mut doc = Document::new();
+        let mut stack = CommandStack::with_default_limit();
+        let err = stack
+            .execute(
+                &mut doc,
+                Command::SetParameter {
+                    node_id: new_node_id(),
+                    property: "width".to_string(),
+                    value: ParamValue::float_literal(1.0),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, VectraError::NodeNotFound(_)));
+        assert!(!stack.can_undo());
+    }
+
+    #[test]
+    fn define_remove_expression_undo_round_trip() {
+        let mut doc = Document::new();
+        let mut stack = CommandStack::with_default_limit();
+        let id = new_expression_id();
+        stack
+            .execute(
+                &mut doc,
+                Command::DefineExpression {
+                    id,
+                    source: "$a * 2".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(doc.expressions.get(&id).unwrap().source, "$a * 2");
+
+        // Redefine overwrites; undo restores the previous source.
+        stack
+            .execute(
+                &mut doc,
+                Command::DefineExpression {
+                    id,
+                    source: "$b".to_string(),
+                },
+            )
+            .unwrap();
+        stack.undo(&mut doc).unwrap();
+        assert_eq!(doc.expressions.get(&id).unwrap().source, "$a * 2");
+        stack.redo(&mut doc).unwrap();
+        assert_eq!(doc.expressions.get(&id).unwrap().source, "$b");
+
+        // Remove; undo restores.
+        stack
+            .execute(&mut doc, Command::RemoveExpression { id })
+            .unwrap();
+        assert!(!doc.expressions.contains_key(&id));
+        stack.undo(&mut doc).unwrap();
+        assert_eq!(doc.expressions.get(&id).unwrap().source, "$b");
+
+        // Removing an unknown id fails typed and is stack-neutral.
+        let depth = stack.undo_len();
+        assert!(matches!(
+            stack.execute(
+                &mut doc,
+                Command::RemoveExpression {
+                    id: new_expression_id()
+                }
+            ),
+            Err(VectraError::ExpressionNotFound(_))
+        ));
+        assert_eq!(stack.undo_len(), depth);
+    }
+
+    #[test]
+    fn stack_peeks_without_mutating() {
+        let mut doc = Document::new();
+        let mut stack = CommandStack::with_default_limit();
+        assert!(stack.peek_undo().is_none());
+        assert!(stack.peek_redo().is_none());
+
+        let id = new_node_id();
+        stack.execute(&mut doc, rect_cmd(id)).unwrap();
+        stack
+            .execute(
+                &mut doc,
+                Command::SetVariable {
+                    name: "base".to_string(),
+                    value: 9.0,
+                },
+            )
+            .unwrap();
+
+        // peek_undo returns the INVERSE of the newest entry (what undo applies).
+        match stack.peek_undo().unwrap() {
+            Command::RemoveVariable { name } => assert_eq!(name, "base"),
+            other => panic!("expected inverse RemoveVariable, got {other:?}"),
+        }
+        assert_eq!(stack.peek_undo_label(), Some("Set $base"));
+        // Peeking is side-effect free.
+        assert_eq!(doc.variables.get("base"), Some(&9.0));
+        assert_eq!(stack.undo_len(), 2);
+
+        stack.undo(&mut doc).unwrap();
+        // After the undo, redo would re-apply the forward command.
+        assert!(matches!(
+            stack.peek_redo().unwrap(),
+            Command::SetVariable { name, value } if name == "base" && *value == 9.0
+        ));
+        assert!(stack.peek_undo().is_some());
+    }
+
+    #[test]
+    fn dirty_event_serializes_with_mode() {
+        let event = EngineEvent::Dirty {
+            ids: vec![new_node_id()],
+            mode: crate::eval::EvalMode::Incremental,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "Dirty");
+        assert_eq!(json["mode"], "incremental");
+        assert_eq!(json["ids"].as_array().unwrap().len(), 1);
+
+        // preview_events never claims a Dirty event (it is derived, not intent).
+        let cmd = rect_cmd(new_node_id());
+        assert!(!cmd
+            .preview_events()
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Dirty { .. })));
+    }
+
+    // ── Task 7.0: the procedural graph's commands ──────────────────────
+
+    fn grid_cmd(id: NodeId) -> Command {
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                id,
+                crate::procedural::ProceduralKind::grid(3.0, 2.0, 10.0, crate::geom::Point2::ZERO),
+            ),
+        }
+    }
+
+    #[test]
+    fn add_remove_procedural_node_round_trips_with_its_wires() {
+        let mut doc = Document::new();
+        let grid = crate::ids::new_node_id();
+        let smooth = crate::ids::new_node_id();
+        grid_cmd(grid).apply(&mut doc).unwrap();
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                smooth,
+                crate::procedural::ProceduralKind::smooth(2.0, 0.5),
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        // Wire the modifier to the generator.
+        let forward = Command::ConnectProcedural {
+            node_id: smooth,
+            port: "region".into(),
+            from: crate::param::NodeOutputId::new(grid, "region"),
+        };
+        forward.apply(&mut doc).unwrap();
+        assert_eq!(doc.procedural.get(smooth).unwrap().wires.len(), 1, "wired");
+
+        // Removing the *generator* withdraws the consumer's wire and returns
+        // both, so undo restores the whole picture.
+        let remove = Command::RemoveProceduralNode { id: grid };
+        let inverse = remove.apply(&mut doc).unwrap();
+        assert!(!doc.procedural.contains(grid));
+        assert!(
+            doc.procedural.get(smooth).unwrap().wires.is_empty(),
+            "the dangling wire left with its upstream"
+        );
+
+        inverse.apply(&mut doc).unwrap();
+        assert!(doc.procedural.contains(grid));
+        assert_eq!(
+            doc.procedural.get(smooth).unwrap().wires["region"],
+            crate::param::NodeOutputId::new(grid, "region"),
+            "undo restored the record *and* the wire into it"
+        );
+    }
+
+    #[test]
+    fn connect_and_disconnect_have_exact_inverses() {
+        let mut doc = Document::new();
+        let grid = crate::ids::new_node_id();
+        let smooth = crate::ids::new_node_id();
+        grid_cmd(grid).apply(&mut doc).unwrap();
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                smooth,
+                crate::procedural::ProceduralKind::smooth(2.0, 0.5),
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+
+        let connect = Command::ConnectProcedural {
+            node_id: smooth,
+            port: "region".into(),
+            from: crate::param::NodeOutputId::new(grid, "region"),
+        };
+        let inverse = connect.apply(&mut doc).unwrap();
+        assert!(matches!(inverse, Command::DisconnectProcedural { .. }));
+        inverse.apply(&mut doc).unwrap();
+        assert!(doc.procedural.get(smooth).unwrap().wires.is_empty());
+
+        // Re-connecting the *same* address has a re-connect inverse: the wire
+        // is genuinely replaced, so undo must replace it back.
+        connect.apply(&mut doc).unwrap();
+        let again = connect.apply(&mut doc).unwrap();
+        assert_eq!(again, connect, "same wire ⇒ the same wire is restored");
+        let disconnect = Command::DisconnectProcedural {
+            node_id: smooth,
+            port: "region".into(),
+        };
+        let restore = disconnect.apply(&mut doc).unwrap();
+        assert!(matches!(restore, Command::ConnectProcedural { .. }));
+        disconnect.apply(&mut doc).unwrap_err(); // already gone: typed refusal
+    }
+
+    #[test]
+    fn procedural_operands_are_parametric_and_undoable() {
+        let mut doc = Document::new();
+        let grid = crate::ids::new_node_id();
+        grid_cmd(grid).apply(&mut doc).unwrap();
+
+        let forward = Command::SetProceduralOperand {
+            node_id: grid,
+            port: "spacing".into(),
+            value: ParamValue::Float(Parameter::Variable("gap".into())),
+        };
+        let inverse = forward.apply(&mut doc).unwrap();
+        assert_eq!(
+            doc.procedural.get(grid).unwrap().operands["spacing"],
+            ParamValue::Float(Parameter::Variable("gap".into())),
+            "a procedural operand is as parametric as any other slot"
+        );
+        inverse.apply(&mut doc).unwrap();
+        assert_eq!(
+            doc.procedural.get(grid).unwrap().operands["spacing"],
+            ParamValue::float_literal(10.0),
+            "undo restores the effective previous value"
+        );
+    }
+
+    #[test]
+    fn rule_three_and_port_typing_gate_the_commands() {
+        let mut doc = Document::new();
+        let grid = crate::ids::new_node_id();
+        let smooth = crate::ids::new_node_id();
+        grid_cmd(grid).apply(&mut doc).unwrap();
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                smooth,
+                crate::procedural::ProceduralKind::smooth(2.0, 0.5),
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+
+        // RULE 3: an operand may not read a procedural output.
+        let disguised = Command::SetProceduralOperand {
+            node_id: smooth,
+            port: "iterations".into(),
+            value: ParamValue::Float(Parameter::Procedural(crate::param::NodeOutputId::new(
+                grid, "span",
+            ))),
+        };
+        let error = disguised.apply(&mut doc).unwrap_err();
+        assert!(error.is_cycle_rejection(), "{error}");
+        assert_eq!(
+            doc.procedural.get(smooth).unwrap().operands["iterations"],
+            ParamValue::float_literal(2.0),
+            "a rejected command mutates nothing"
+        );
+
+        // RULE 1: a Points port cannot feed a Region input.
+        let mismatched = Command::ConnectProcedural {
+            node_id: smooth,
+            port: "region".into(),
+            from: crate::param::NodeOutputId::new(grid, "points"),
+        };
+        let error = mismatched.apply(&mut doc).unwrap_err();
+        assert!(matches!(
+            error,
+            VectraError::Resolve(crate::error::ResolveError::ProceduralPortType { .. })
+        ));
+
+        // A wheel: the node cannot consume its own output.
+        let self_wire = Command::ConnectProcedural {
+            node_id: smooth,
+            port: "region".into(),
+            from: crate::param::NodeOutputId::new(smooth, "region"),
+        };
+        assert!(self_wire.apply(&mut doc).unwrap_err().is_cycle_rejection());
+    }
+
+    /// The gate the graph cannot run: a slot may read a port, but not one the
+    /// slot's own geometry feeds. The graph draws edges for ports only, so this
+    /// loop has to be caught by walking shapes at the boundary.
+    #[test]
+    fn the_cycle_gate_sees_through_geometry_too() {
+        let mut doc = Document::new();
+        let rect = new_node_id();
+        rect_cmd(rect).apply(&mut doc).unwrap();
+        let grid = new_node_id();
+        grid_cmd(grid).apply(&mut doc).unwrap();
+        let source = new_node_id();
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                source,
+                crate::procedural::ProceduralKind::Source { node: rect },
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        let smooth = new_node_id();
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                smooth,
+                crate::procedural::ProceduralKind::smooth(2.0, 0.5),
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        // ⬡ smooth ← ⬡ source ← ◻ rect — and nothing reads rect's geometry
+        // except this chain.
+        Command::ConnectProcedural {
+            node_id: smooth,
+            port: "region".into(),
+            from: NodeOutputId::new(source, "region"),
+        }
+        .apply(&mut doc)
+        .unwrap();
+
+        // Legal: the grid is upstream of nothing, so rect reading its span is
+        // the value path the whole task exists to carry.
+        Command::SetParameter {
+            node_id: rect,
+            property: "width".into(),
+            value: ParamValue::Float(Parameter::Procedural(NodeOutputId::new(grid, "span"))),
+        }
+        .apply(&mut doc)
+        .unwrap();
+
+        // …but reading the *downstream* chain's port closes the loop through
+        // rect's own shape. Refused, typed, before anything moved.
+        let disguised = Command::SetParameter {
+            node_id: rect,
+            property: "height".into(),
+            value: ParamValue::Float(Parameter::Procedural(NodeOutputId::new(smooth, "region"))),
+        };
+        let error = disguised.apply(&mut doc).unwrap_err();
+        assert!(error.is_cycle_rejection(), "{error}");
+        assert!(error.to_string().contains("cycle"), "{error}");
+        let NodeKind::Rectangle { height, .. } = &doc.get_node(rect).unwrap().kind else {
+            panic!("the rect became something else");
+        };
+        assert_eq!(
+            *height,
+            Parameter::Literal(50.0),
+            "a rejected command mutates nothing"
+        );
+
+        // The same ban reaches a binding: the spring steers the very node whose
+        // shape feeds the port it aims at.
+        let bound = Command::BindMotion {
+            node_id: rect,
+            property: "width".into(),
+            binding: MotionBinding::spring(
+                Parameter::Procedural(NodeOutputId::new(smooth, "region")),
+                120.0,
+                12.0,
+                0.0,
+                0.0,
+            ),
+        };
+        assert!(bound.apply(&mut doc).unwrap_err().is_cycle_rejection());
+        // Style is **not** geometry, so the paint may read the port the shape
+        // feeds: fill flows source → rect → noise → tint → rect, and the tint
+        // feeds nothing. Rejecting this would make a legal document unwritable
+        // (the wasm colour-door law reads exactly this shape).
+        let noise = new_node_id();
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                noise,
+                crate::procedural::ProceduralKind::noise(1.0, 0.2, 7.0),
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        Command::ConnectProcedural {
+            node_id: noise,
+            port: "region".into(),
+            from: NodeOutputId::new(source, "region"),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        Command::SetParameter {
+            node_id: rect,
+            property: "style.fill".into(),
+            value: ParamValue::Color(Parameter::Procedural(NodeOutputId::new(noise, "tint"))),
+        }
+        .apply(&mut doc)
+        .expect("the colour door is not a cycle: paint feeds no geometry");
+        // …but the same reference from a *geometry* slot is still refused.
+        let paint_from_geometry = Command::SetParameter {
+            node_id: rect,
+            property: "width".into(),
+            value: ParamValue::Float(Parameter::Procedural(NodeOutputId::new(noise, "scalar"))),
+        };
+        assert!(paint_from_geometry
+            .apply(&mut doc)
+            .unwrap_err()
+            .is_cycle_rejection());
+
+        // …and a binding aimed at a port nothing feeds from rect is fine.
+        Command::BindMotion {
+            node_id: rect,
+            property: "height".into(),
+            binding: MotionBinding::spring(
+                Parameter::Procedural(NodeOutputId::new(grid, "span")),
+                120.0,
+                12.0,
+                0.0,
+                0.0,
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+
+    #[test]
+    fn delete_node_withdraws_source_nodes_and_undo_restores_them() {
+        let mut doc = Document::new();
+        let rect = crate::ids::new_node_id();
+        rect_cmd(rect).apply(&mut doc).unwrap();
+        let source = crate::ids::new_node_id();
+        Command::AddProceduralNode {
+            node: crate::procedural::ProceduralNode::new(
+                source,
+                crate::procedural::ProceduralKind::Source { node: rect },
+            ),
+        }
+        .apply(&mut doc)
+        .unwrap();
+
+        let inverse = Command::DeleteNode { id: rect }.apply(&mut doc).unwrap();
+        assert!(
+            !doc.procedural.contains(source),
+            "a Source with nothing to read is withdrawn with its subject"
+        );
+        inverse.apply(&mut doc).unwrap();
+        assert!(doc.procedural.contains(source), "and restored with it");
+        assert_eq!(doc.get_node(rect).unwrap().id, rect);
+    }
+
+    #[test]
+    fn a_procedural_result_is_live_geometry_and_a_parked_one_is_not() {
+        // RULE 4: the live-id space includes enabled geometry-producing nodes.
+        let mut doc = Document::new();
+        let grid = crate::ids::new_node_id();
+        grid_cmd(grid).apply(&mut doc).unwrap();
+        assert!(doc.is_geometry_id(grid));
+        assert_eq!(doc.geometry_ids(), vec![grid]);
+
+        Command::SetProceduralEnabled {
+            id: grid,
+            enabled: false,
+        }
+        .apply(&mut doc)
+        .unwrap();
+        assert!(!doc.is_geometry_id(grid), "parked ⇒ not live geometry");
+        assert!(doc.geometry_ids().is_empty());
+        let parked = Command::SetProceduralEnabled {
+            id: grid,
+            enabled: true,
+        }
+        .apply(&mut doc)
+        .unwrap();
+        assert!(matches!(
+            parked,
+            Command::SetProceduralEnabled { enabled: false, .. }
+        ));
+        assert!(doc.is_geometry_id(grid), "re-armed ⇒ live again");
+    }
+
+    #[test]
+    fn a_slot_reading_a_port_is_reported_as_a_reader() {
+        let mut doc = Document::new();
+        let rect = crate::ids::new_node_id();
+        rect_cmd(rect).apply(&mut doc).unwrap();
+        let port = crate::param::NodeOutputId::new(crate::ids::new_node_id(), "span");
+        Command::SetParameter {
+            node_id: rect,
+            property: "width".into(),
+            value: ParamValue::Float(Parameter::Procedural(port.clone())),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        assert_eq!(
+            doc.procedural_readers(std::slice::from_ref(&port)),
+            vec![rect]
+        );
+        assert!(
+            doc.procedural_readers(&[crate::param::NodeOutputId::new(
+                crate::ids::new_node_id(),
+                "span"
+            )])
+            .is_empty(),
+            "an unrelated port has no readers here"
+        );
+    }
+
+    #[test]
+    fn command_json_roundtrip() {
+        let cmd = Command::SetVariable {
+            name: "base".to_string(),
+            value: 12.0,
+        };
+        let json = cmd.to_json().unwrap();
+        assert_eq!(Command::from_json(&json).unwrap(), cmd);
+    }
+}

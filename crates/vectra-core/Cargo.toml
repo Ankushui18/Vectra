@@ -1,0 +1,19 @@
+[package]
+name = "vectra-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA core: IDs, Parameter<T>, Document model, Command/Undo system (MES §3, §4, §14)"
+
+[dependencies]
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[features]
+default = []

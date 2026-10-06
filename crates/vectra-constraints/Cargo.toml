@@ -1,0 +1,18 @@
+[package]
+name = "vectra-constraints"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA constraints: linear (Cassowary) + nonlinear solvers, diagnostics, dependency graph (MES §8–§9)"
+
+[dependencies]
+vectra-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+cassowary.workspace = true
+nalgebra.workspace = true
+petgraph.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

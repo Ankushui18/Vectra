@@ -1,0 +1,28 @@
+[package]
+name = "vectra-dependency"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA dependency graph + dirty propagation + incremental evaluation (MES §8, Task 2.2)"
+
+# Layer: above core + expression + geometry, below the engine owner
+# (`vectra-wasm`) and render. The graph is *derived* from the document and the
+# expression compiler, so it never needs its own persistence or mutation
+# protocol — see the crate docs for the single-derivation rule.
+[dependencies]
+vectra-core.workspace = true
+vectra-expression.workspace = true
+vectra-geometry.workspace = true
+petgraph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+# The 10.2 laws are statements about both halves of the pipeline: the scene the
+# evaluator produces *and* the draw list the renderer derives from it. Dev-only,
+# so no shipping crate gains an edge (and `vectra-render` does not depend on
+# this one, so there is no cycle).
+vectra-render = { path = "../vectra-render" }

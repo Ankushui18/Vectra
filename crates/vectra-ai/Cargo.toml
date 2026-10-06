@@ -1,0 +1,19 @@
+[package]
+name = "vectra-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA AI command layer: strict command schema, system prompt, validation and self-correction"
+
+[dependencies]
+# The AI layer speaks the engine's own language: `Command`, `DocumentSummary`,
+# `EngineEvent`, `VectraError`. There is no second command language here, which
+# is RULE 1 in one line of Cargo.toml.
+vectra-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
