@@ -1,0 +1,64 @@
+[package]
+name = "vectra-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA WASM bindings: wasm-bindgen command-bus API (MES §15)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Boundary law (Task 1.4 §4, amended by 2.1/2.2, re-amended by 5.0): the WASM
+# shell sees the parametric core, the compiled expression registry, the
+# evaluated scene, the dependency graph, the solver and — since Task 5.0 — the
+# renderer. The renderer joins the way §16 of the MES says it should: the shell
+# feeds it `EvaluatedScene` values and it draws them. It still learns nothing
+# about variables, expressions, constraints or operations, and the shell learns
+# nothing about WGSL, buffers or tessellation.
+[dependencies]
+vectra-draw.workspace = true
+vectra-constraints.workspace = true
+vectra-core.workspace = true
+vectra-expression.workspace = true
+vectra-geometry.workspace = true
+vectra-motion.workspace = true
+vectra-dependency.workspace = true
+vectra-operations.workspace = true
+vectra-procedural.workspace = true
+vectra-export.workspace = true
+vectra-ai.workspace = true
+vectra-render.workspace = true
+wgpu.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+console_error_panic_hook.workspace = true
+
+# uuid v4 needs a browser entropy source on wasm32-unknown-unknown
+# (uuid's `js` feature calls WebCrypto directly; getrandom is not in its
+# wasm graph at all).
+#
+# The DOM half of Task 5.0 lives behind `cfg(target_arch = "wasm32")` for the
+# same reason: `render.rs`'s pointer path is plain Rust and must stay testable
+# on the host, so only `attach`/`measure` — the two functions that read a
+# `<canvas>` — name `web-sys` at all.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+web-sys = { workspace = true, features = [
+    "Document",
+    "DomRect",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }
+wasm-bindgen-futures.workspace = true
+
+# Task 10.0's law tests drive the *container* from the boundary: they take what
+# `VectraEngine::document_json` hands the desktop host, put it through the real
+# `.vectra` codec and its replay plan, and insist a fresh engine comes back with
+# the same document. The dependency is dev-only — the shipped boundary still
+# knows nothing about files.
+[dev-dependencies]
+vectra-draw.workspace = true
+vectra-file = { path = "../vectra-file", version = "0.1.0" }

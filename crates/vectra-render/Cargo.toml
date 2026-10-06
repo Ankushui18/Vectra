@@ -1,0 +1,27 @@
+[package]
+name = "vectra-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA renderer: wgpu scene graph, GPU buffers, hit-testing BVH/R-tree (MES §13)"
+
+[dependencies]
+vectra-core.workspace = true
+vectra-geometry.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+lyon.workspace = true
+# Point-in-polygon for exact hit testing (Task 5.0 RULE 3). `geo` is already in
+# the tree as the boolean engine (Task 4.0 RULE 2); the renderer reuses its
+# `Contains` implementation rather than hand-rolling ray-crossing.
+geo.workspace = true
+geo-types.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+# The WGSL in `src/shader.wgsl` is validated — parsed and type-checked — by the
+# same front end wgpu itself uses, which is how the shader is tested without a
+# GPU (Task 5.0 §5).
+naga = { version = "22", features = ["wgsl-in"] }

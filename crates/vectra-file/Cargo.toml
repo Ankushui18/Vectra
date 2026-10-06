@@ -1,0 +1,16 @@
+[package]
+name = "vectra-file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA document container: the .vectra file format and the Document → Command replay plan (Task 10.0)"
+
+[dependencies]
+vectra-core.workspace = true
+serde_json.workspace = true
+flate2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "vectra-geometry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA geometry: primitives, paths, arcs, regions, tessellation (MES §5)"
+
+[dependencies]
+vectra-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+lyon.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

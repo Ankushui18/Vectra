@@ -1,0 +1,18 @@
+[package]
+name = "vectra-operations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA non-destructive operations: boolean, offset, fillet, mirror, repeat (MES §10)"
+
+[dependencies]
+vectra-core.workspace = true
+vectra-geometry.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+lyon.workspace = true
+geo.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

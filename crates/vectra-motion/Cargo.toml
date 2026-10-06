@@ -1,0 +1,15 @@
+[package]
+name = "vectra-motion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "VECTRA motion: timeline, springs, physics, state machines as Parameter resolvers (MES §12)"
+
+[dependencies]
+vectra-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
