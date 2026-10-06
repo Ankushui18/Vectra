@@ -1,0 +1,1913 @@
+/* VECTRA remote — minimal dark console theme. No external assets. */
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #1d242e;
+  --border: #2d333b;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #2f81f7;
+  --green: #3fb950;
+  --amber: #d29922;
+  --red: #f85149;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-mark {
+  font-size: 26px;
+  color: var(--accent);
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.25em;
+}
+
+.brand p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+}
+
+.status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status-loading .dot {
+  background: var(--amber);
+  animation: pulse 1s infinite alternate;
+}
+
+.status-ready .dot {
+  background: var(--green);
+}
+
+.status-error .dot {
+  background: var(--red);
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ── Layout ─────────────────────────────────────────────────────────── */
+
+.main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-areas:
+    'canvas side'
+    'bottom bottom';
+  gap: 12px;
+  padding: 12px 20px 20px;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.panel h2 .sub {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: normal;
+  opacity: 0.8;
+}
+
+.canvas-panel {
+  grid-area: canvas;
+}
+
+.side {
+  grid-area: side;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.bottom {
+  grid-area: bottom;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+/* ── Dependency inspector (Task 2.2) ────────────────────────────────── */
+
+.deps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.deps li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.dep-from {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.dep-arrow {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.dep-to {
+  color: var(--accent, #6ea8fe);
+}
+
+/* ── Incrementality affordances (Task 2.2) ──────────────────────────── */
+
+.log-dirty {
+  color: var(--accent, #6ea8fe);
+}
+
+.dirty-chip {
+  color: var(--accent, #6ea8fe);
+  font-size: 11px;
+  animation: pulse 0.6s ease-out;
+}
+
+.layer-dirty {
+  outline: 1px solid rgba(110, 168, 254, 0.45);
+  outline-offset: -1px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.eval-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.eval-mode {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent, #6ea8fe);
+  font-weight: 600;
+}
+
+.eval-counts {
+  opacity: 0.75;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--muted);
+  align-self: center;
+}
+
+/* ── Canvas ─────────────────────────────────────────────────────────── */
+
+/* Task 5.0: the WebGPU canvas. Fixed 4:3, matching the document window the
+ * renderer opens with (`Camera::fit(800, 600)`), so the CSS grid overlay below
+ * lines up with document units exactly. */
+.preview {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 800 / 600;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  display: block;
+  background: #0a0d12;
+}
+
+.canvas-wrap {
+  position: relative;
+  line-height: 0;
+}
+
+/* A 50-document-unit grid, as a percentage of the fixed 800×600 window. It is
+ * decoration: the renderer neither knows nor draws it. Phase 2's pan/zoom moves
+ * it into the shader, where it can follow the camera. */
+.canvas-grid {
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(
+      to right,
+      rgba(120, 160, 220, 0.09) 0 1px,
+      transparent 1px 100%
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(120, 160, 220, 0.09) 0 1px,
+      transparent 1px 100%
+    );
+  background-size: 6.25% 8.3333%;
+}
+
+.canvas-hint,
+.canvas-banner {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 14px;
+  line-height: 1.4;
+  border-radius: 6px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.canvas-hint {
+  top: 50%;
+  margin-top: -0.7em;
+  color: var(--muted);
+}
+
+.canvas-banner {
+  top: 12px;
+  max-width: 80%;
+  padding: 8px 12px;
+  background: rgba(120, 30, 30, 0.85);
+  border: 1px solid rgba(255, 120, 120, 0.4);
+  color: #ffe8e8;
+}
+
+.canvas-frame {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+  background: rgba(10, 13, 18, 0.72);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+/* The artboard box editor (Task 10.3 RULE 2): four small numbers and a hex
+   string, sitting inside the detail row next to the board's name. */
+.artboard-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.board-field {
+  display: inline-flex;
+  align-items: center;
+}
+
+.board-input {
+  width: 52px;
+  padding: 1px 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg, #eee);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line, #333);
+  border-radius: 4px;
+}
+
+.board-input:focus {
+  outline: 1px solid rgba(150, 190, 255, 0.5);
+}
+
+.board-hex {
+  width: 76px;
+}
+
+/* A number input's spinners fight a 52-pixel field. */
+.board-input::-webkit-outer-spin-button,
+.board-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ── The navigation overlay (Task 10.3 RULE 2) ─────────────────────────────
+   The artboard frames sit *under* the drawing overlay in z-order (both are
+   pointer-events: none, so the canvas keeps every gesture), and the zoom
+   controls float top-right, re-enabling pointers for themselves only. */
+
+.nav-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* The visible document window: the rectangle the camera is showing. */
+.nav-window {
+  fill: none;
+  stroke: rgba(150, 190, 255, 0.22);
+  stroke-width: 1;
+  stroke-dasharray: 4 6;
+}
+
+/* A board is tinted with its own background at low alpha — enough to say "this
+   is the page", never enough to compete with the artwork drawn on it. */
+.nav-board {
+  fill-opacity: 0.12;
+  stroke: rgba(150, 190, 255, 0.35);
+  stroke-width: 1;
+}
+
+.nav-board-active {
+  stroke: rgba(180, 220, 255, 0.75);
+  stroke-width: 1.5;
+}
+
+.nav-board-label {
+  fill: rgba(200, 220, 255, 0.6);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.nav-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+  pointer-events: auto;
+  background: rgba(10, 13, 18, 0.72);
+  border: 1px solid var(--line, #333);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.nav-button {
+  min-width: 26px;
+  height: 22px;
+  padding: 0 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg, #eee);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.nav-button:hover:not(:disabled) {
+  background: rgba(120, 160, 220, 0.18);
+}
+
+.nav-button:disabled {
+  color: var(--muted, #888);
+  cursor: default;
+}
+
+.nav-zoom {
+  min-width: 52px;
+}
+
+/* The old SVG node affordances are gone with the projection: the canvas is one
+ * element now, and the cursor is the only hover affordance left. */
+.preview {
+  cursor: default;
+}
+
+.diag-strip {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.diag-clean {
+  color: var(--green);
+}
+
+.diag {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--panel-2);
+}
+
+.diag-warning {
+  color: var(--amber);
+}
+
+.diag-error {
+  color: var(--red);
+}
+
+.diag-info {
+  color: var(--muted);
+}
+
+/* ── Controls ───────────────────────────────────────────────────────── */
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+button {
+  flex: 1;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-btn {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 6px;
+}
+
+.icon-btn:hover {
+  color: var(--red);
+  filter: none;
+}
+
+.time-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.time-row input {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.empty {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 4px 0 8px;
+}
+
+/* ── Layers / variables ─────────────────────────────────────────────── */
+
+.layers,
+.vars {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.layers li,
+.vars li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.kind-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.layer-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-id {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.var-name {
+  font-family: var(--mono);
+  color: var(--green);
+}
+
+.var-value {
+  margin-left: auto;
+  font-family: var(--mono);
+}
+
+.var-form {
+  display: flex;
+  gap: 6px;
+}
+
+.var-form input {
+  min-width: 0;
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.var-form button {
+  flex: 0 0 auto;
+}
+
+/* ── Log ────────────────────────────────────────────────────────────── */
+
+.log {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: #0a0d12;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  display: flex;
+  gap: 10px;
+  word-break: break-all;
+}
+
+.log-seq {
+  color: var(--muted);
+  flex: 0 0 3ch;
+  text-align: right;
+}
+
+.log-cmd {
+  color: var(--text);
+}
+
+.log-ok {
+  color: var(--green);
+}
+
+.log-error {
+  color: var(--red);
+}
+
+.log-info {
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .main {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      'canvas'
+      'side'
+      'bottom';
+  }
+
+  .bottom {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Task 3.1: selection + constraints ─────────────────────────────────── */
+
+.layers li {
+  cursor: pointer;
+}
+
+.layer-selected {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
+}
+
+.pick-chip {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.constraints {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.constraints li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.constraint-detail {
+  flex: 1 1 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strength-chip,
+.dropped-chip {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.strength-chip {
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.dropped-chip {
+  color: var(--amber);
+  border: 1px solid var(--amber);
+}
+
+.constraint-dropped .constraint-detail,
+.constraint-dropped .kind-tag {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+/* ── Task 4.0: non-destructive operations ──────────────────────────────── */
+
+/* An operation row is a *virtual* node's row: indented under the source it
+ * reads, with the operand summary spelled out (`A − B`). The indent is the
+ * only thing the panel adds — the nesting itself is the engine's `inputs`. */
+.layer-nested {
+  margin-left: 18px;
+  border-left: 2px solid var(--accent);
+  border-top-left-radius: 2px;
+  border-bottom-left-radius: 2px;
+}
+
+.layer-op {
+  /* Result rows are not operands in Phase 1, so they are not clickable. */
+  cursor: default;
+}
+
+.layer-op .kind-tag {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.op-glyph {
+  font-family: var(--mono);
+  color: var(--amber);
+  margin-right: 6px;
+}
+
+.ops {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.ops li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.op-desc {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--amber);
+}
+
+.op-operands {
+  flex: 1 1 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-toggle {
+  display: flex;
+  align-items: center;
+}
+
+.op-parked {
+  opacity: 0.55;
+}
+
+.op-parked .op-desc,
+.op-parked .op-operands {
+  text-decoration: line-through;
+}
+
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.field-inline input {
+  width: 58px;
+}
+
+/* ── Task 3.2: direct manipulation (the canvas is the pointer's surface) ──
+ *
+ * Task 5.0 moved the surface from SVG elements to a single `<canvas>`: there is
+ * no per-node DOM left to style, so the per-node affordances are gone with it.
+ * The gesture is still visible — the instance's `params.z` slot is reserved for
+ * a selection overlay, which is Task 5.1's renderer work, and until then the
+ * drag readout below the canvas and the inspector both name the moving node.
+ */
+
+.preview:active {
+  cursor: grabbing;
+}
+
+.drag-strip {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim, #8b93a7);
+}
+
+.drag-strip::before {
+  content: '⇢ ';
+}
+
+/* ── Task 6.0: motion ────────────────────────────────────────────────────
+ *
+ * The panel styles three things and nothing more: the *live* badge (motion is
+ * running — the same colour the frame readout uses, because it is the same
+ * fact), the chips (state flags: inputs, never history) and the binding rows.
+ * The rows borrow the Layers list's shape on purpose: a binding is a property
+ * of a layer, and reading the two lists the same way is the point.
+ */
+.badge-live {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--accent, #7cc4ff);
+  border: 1px solid color-mix(in srgb, var(--accent, #7cc4ff) 45%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border: 1px solid var(--line, #333);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted, #999);
+}
+
+button.chip:hover {
+  color: var(--fg, #eee);
+  border-color: var(--muted, #999);
+  cursor: pointer;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted, #999);
+}
+
+ul.motion {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 11px;
+}
+
+ul.motion li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border-top: 1px solid var(--line, #2a2a2a);
+}
+
+/* Upright and monospaced so a value column stays a column. */
+.motion-detail {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.motion-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #999);
+}
+
+.motion-live {
+  color: var(--accent, #7cc4ff);
+  width: 12px;
+  text-align: center;
+}
+
+.motion-rest {
+  color: var(--line, #555);
+  width: 12px;
+  text-align: center;
+}
+
+/* Task 7.0: the Procedural panel. A row is a node: its head is the summary, its
+   ports line is what the last pass published, and its controls are the wiring and
+   operand editors — one control per port the engine declared. */
+.procedural li {
+  display: block;
+}
+
+.proc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.proc-ports {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  opacity: 0.75;
+  margin: 2px 0 4px 0;
+}
+
+.proc-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.proc-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.proc-port {
+  font-size: 11px;
+  opacity: 0.8;
+  min-width: 60px;
+}
+
+.proc-control select,
+.proc-input {
+  font-size: 11px;
+  padding: 2px 4px;
+  max-width: 220px;
+}
+
+.proc-input {
+  width: 90px;
+}
+
+.proc-diagnostics {
+  margin: 6px 0 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  color: var(--danger, #ff6b6b);
+}
+
+/* ── Export modal (Task 8.0) ────────────────────────────────────────── */
+
+select {
+  flex: 1;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.export-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  z-index: 20;
+}
+
+.export-sheet {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: min(880px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.export-sheet header,
+.export-sheet footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.export-sheet footer {
+  border-bottom: none;
+  border-top: 1px solid var(--border);
+}
+
+.export-sheet header strong {
+  flex: 1;
+}
+
+.export-sheet header button {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 8px;
+}
+
+.export-sheet footer button {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+}
+
+.export-warnings {
+  margin: 0;
+  padding: 8px 16px 8px 32px;
+  background: rgba(210, 153, 34, 0.12);
+  border-bottom: 1px solid var(--border);
+  color: var(--amber);
+  font-size: 12px;
+}
+
+.export-code {
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text);
+}
+
+/* ── AI Assistant (Task 9.0) ─────────────────────────────────────────────
+   The panel's job is to make the *translation* visible: the prompt, the JSON
+   commands it produced, what the engine said about them, and — when a command
+   was refused — the correction that fixed it. Nothing here is decoration: each
+   rule styles a fact the reader needs to trust the loop. */
+
+.ai-panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-kbd {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.ai-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--panel-2, rgba(255, 255, 255, 0.04));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.ai-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.ai-hint-line {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ai-plan {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+}
+
+.ai-plan li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+  word-break: break-all;
+}
+
+.ai-plan li:last-child {
+  border-bottom: none;
+}
+
+.ai-plan-index {
+  flex: 0 0 2ch;
+  color: var(--muted);
+  text-align: right;
+}
+
+.ai-plan-tag {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+
+.ai-plan-target {
+  flex: 0 1 auto;
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.ai-plan-json {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-corrections {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  list-style: none;
+  background: rgba(210, 153, 34, 0.12);
+  border-radius: 6px;
+  color: var(--amber);
+  font-size: 11px;
+}
+
+.ai-corrections li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0;
+  word-break: break-all;
+}
+
+.ai-correction-code {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.ai-system-prompt {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  color: var(--muted);
+}
+
+/* ── Task 10.0: the file bar ────────────────────────────────────────────
+   Host-agnostic: it is disabled (with the reason in its tooltip) on the web
+   build, where there are no native dialogs. One row, above the panels. */
+.doc-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #1f2430;
+  background: #0d1117;
+  font-size: 12px;
+  color: #9aa4b2;
+}
+.doc-menu {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.doc-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  color: #6b7482;
+  margin-right: 2px;
+}
+.doc-button {
+  background: #161b22;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.doc-button:hover:not(:disabled) {
+  background: #1f2632;
+  border-color: #3d4757;
+}
+.doc-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.doc-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.doc-name {
+  color: #e6edf3;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc-untitled,
+.doc-phase {
+  color: #6b7482;
+}
+.doc-host {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.doc-badge {
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.doc-badge-desktop {
+  background: #17351f;
+  color: #3fb950;
+  border: 1px solid #265c33;
+}
+.doc-badge-browser {
+  background: #2b2113;
+  color: #d29922;
+  border: 1px solid #5b4415;
+}
+.doc-host-note {
+  color: #6b7482;
+}
+.doc-button-quiet {
+  color: #8b949e;
+  border-style: dashed;
+}
+
+/* ── Task 10.1: the drawing suite ──────────────────────────────────────── */
+
+/* The overlay layer. It sits *on top of* the WebGPU canvas and is invisible to
+ * the pointer (`pointer-events: none`), because the canvas beneath it owns every
+ * gesture — an overlay that swallowed samples would break the very tools it
+ * decorates. Every coordinate inside it was placed by the engine's camera. */
+.draw-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.ov-line {
+  fill: none;
+  stroke-width: 1;
+}
+/* The line joining an anchor to its Bézier handle. */
+.ov-line-handle {
+  stroke: #6ea8ff;
+  opacity: 0.75;
+}
+/* The path being drawn — the rubber band of the pen, the stroke of the brush. */
+.ov-line-draft {
+  stroke: #ffd479;
+  stroke-width: 1.4;
+  opacity: 0.95;
+}
+.ov-line-sample {
+  stroke: #ffb86b;
+  stroke-width: 1.2;
+  opacity: 0.7;
+}
+
+.ov-point {
+  fill: #0a0d12;
+  stroke: #d7e3f4;
+  stroke-width: 1.2;
+}
+/* An anchor of a committed path… */
+.ov-anchor {
+  fill: #d7e3f4;
+}
+/* …an anchor the white arrow owns. */
+.ov-anchor.ov-selected {
+  fill: #ffd479;
+  stroke: #ffd479;
+}
+.ov-anchor.ov-hovered {
+  stroke: #ffd479;
+}
+/* An anchor whose value comes from an expression: hollow, because that number
+ * belongs to something other than the mouse. */
+.ov-anchor.ov-driven {
+  fill: #0a0d12;
+  stroke: #7ee0a8;
+}
+/* Bézier handles: small filled squares on the handle lines. */
+.ov-handle {
+  fill: #6ea8ff;
+  stroke: #6ea8ff;
+  stroke-width: 1;
+}
+.ov-handle.ov-selected,
+.ov-handle.ov-hovered {
+  fill: #bcd6ff;
+  stroke: #bcd8ff;
+}
+
+.ov-draft-dot {
+  fill: #ffd479;
+  stroke: none;
+}
+.ov-sample-dot {
+  fill: none;
+  stroke: none;
+}
+/* The tool cursor: a small ring, drawn where the pointer is. */
+.ov-cursor {
+  fill: none;
+  stroke: #ffd479;
+  stroke-width: 1.1;
+  opacity: 0.85;
+}
+
+.ov-hold,
+.ov-snap {
+  fill: #ffd479;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+/* ── The palette ──────────────────────────────────────────────────────── */
+
+.tool-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tool-row {
+  flex-wrap: wrap;
+}
+
+button.tool {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+button.tool.active {
+  border-color: #ffd479;
+  color: #ffd479;
+  box-shadow: inset 0 0 0 1px rgba(255, 212, 121, 0.25);
+}
+
+button.tool kbd {
+  font-size: 9px;
+  opacity: 0.6;
+  border: 1px solid rgba(215, 227, 244, 0.3);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+.tool-status,
+.tool-status-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #9fb4d0;
+}
+
+.hold-note {
+  color: #ffd479;
+}
+
+/* ── The designer rail (what stands in for the parametric panels) ─────── */
+
+.designer-rail .tool-blurb {
+  color: #9fb4d0;
+  font-size: 12px;
+}
+
+.designer-facts {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.designer-facts li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(215, 227, 244, 0.08);
+}
+
+.fact-k {
+  color: #6f86a3;
+}
+
+.fact-v {
+  color: #d7e3f4;
+}
+
+/* ── Task 10.2 · the workspace panels ───────────────────────────────────────
+ *
+ * Layers (RULE 1), Artboards (RULE 2) and Appearance (RULE 3). The visual
+ * rules the task asks for are in here as styles, not as prose:
+ *
+ *  · the Layers Panel is *collapsible* (`.collapsed` is a one-line strip);
+ *  · the eye and the padlock are **icons** in a fixed-width action column, so
+ *    a row never re-flows when one of them changes state;
+ *  · the Appearance Panel's blend modes and paint kinds are glyph buttons with
+ *    the names in their tooltips — no `<select>` of words anywhere;
+ *  · the gradient is a **bar** with a handle per stop.
+ */
+
+.layers-panel,
+.appearance-panel {
+  grid-area: side;
+}
+
+.layers-panel.collapsed {
+  padding-bottom: 6px;
+}
+
+.panel-toggle {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 4px 0 0;
+}
+
+.panel h2 .mini,
+.appearance-add {
+  float: right;
+  text-transform: none;
+  letter-spacing: 0;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.mini {
+  background: rgba(215, 227, 244, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: #d7e3f4;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 7px;
+}
+
+.mini:hover:not(:disabled) {
+  border-color: #7aa2d8;
+}
+
+.mini:disabled,
+.icon:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.layer-list,
+.appearance-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.layer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  color: #cfdcec;
+}
+
+.layer-row.layer-layer {
+  background: rgba(215, 227, 244, 0.05);
+}
+
+.layer-row.active {
+  border-color: #4b7fc4;
+}
+
+.layer-row.hidden .layer-name,
+.layer-row.hidden .node-dot {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.layer-row.locked .layer-name {
+  font-style: italic;
+}
+
+.layer-row.drop-target {
+  border-color: #7aa2d8;
+  background: rgba(122, 162, 216, 0.16);
+}
+
+.layer-row.assigning {
+  cursor: copy;
+}
+
+.disclose,
+.icon {
+  background: none;
+  border: none;
+  color: #9fb4cd;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.icon:hover:not(:disabled) {
+  background: rgba(215, 227, 244, 0.12);
+  color: #eaf1fb;
+}
+
+.icon.on {
+  background: rgba(122, 162, 216, 0.3);
+  color: #eaf1fb;
+}
+
+.icon.danger:hover:not(:disabled) {
+  background: rgba(216, 106, 106, 0.25);
+}
+
+.layer-name,
+.appearance-caption {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-name {
+  cursor: text;
+}
+
+.layer-actions {
+  display: inline-flex;
+  gap: 1px;
+  min-width: 84px;
+  justify-content: flex-end;
+}
+
+.layer-flags {
+  color: #6f86a3;
+  font-size: 10px;
+}
+
+.node-dot {
+  color: #6f86a3;
+  font-size: 10px;
+  width: 12px;
+  text-align: center;
+}
+
+.rename,
+.width-input {
+  background: #16202e;
+  border: 1px solid #4b7fc4;
+  border-radius: 4px;
+  color: #eaf1fb;
+  font: inherit;
+  padding: 1px 4px;
+  min-width: 60px;
+}
+
+.chip-active {
+  color: #9fd0ff;
+  border-color: #4b7fc4;
+}
+
+/* ── Appearance ─────────────────────────────────────────────────────────── */
+
+.appearance-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  padding: 4px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: rgba(215, 227, 244, 0.04);
+}
+
+.appearance-row.hidden {
+  opacity: 0.55;
+}
+
+.appearance-row.dragging {
+  opacity: 0.4;
+}
+
+.appearance-grip {
+  cursor: grab;
+  color: #6f86a3;
+}
+
+.paint-kind,
+.blend {
+  position: relative;
+  display: inline-flex;
+}
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  display: inline-block;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.swatch input[type='color'] {
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  cursor: pointer;
+}
+
+.appearance-caption {
+  font-size: 11px;
+  color: #b9c9dd;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 92px;
+}
+
+.width-input {
+  width: 44px;
+  min-width: 0;
+}
+
+.blend-menu {
+  position: absolute;
+  z-index: 5;
+  top: 20px;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  background: #16202e;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px;
+  min-width: 116px;
+}
+
+.blend-menu .icon {
+  text-align: left;
+  font-size: 11px;
+}
+
+.opacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 92px;
+}
+
+.opacity input[type='range'] {
+  width: 62px;
+}
+
+.opacity-value {
+  font-size: 10px;
+  color: #6f86a3;
+  min-width: 30px;
+}
+
+/* The gradient bar: the ramp the engine will sample, with a handle per stop. */
+.gradient-bar {
+  position: relative;
+  flex: 1 0 100%;
+  height: 18px;
+  margin-top: 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background-color: #10161f;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.gradient-stop {
+  position: absolute;
+  top: -3px;
+  width: 12px;
+  height: 22px;
+  margin-left: -6px;
+  border-radius: 3px;
+  border: 2px solid #eaf1fb;
+  padding: 0;
+  cursor: ew-resize;
+}
+
+.gradient-hint {
+  position: absolute;
+  right: 4px;
+  top: 1px;
+  font-size: 9px;
+  color: rgba(234, 241, 251, 0.55);
+  pointer-events: none;
+}
+
+/* ── Artboards ──────────────────────────────────────────────────────────── */
+
+.artboard-bar {
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.artboard-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.artboard-select select {
+  background: #16202e;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: #eaf1fb;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  min-width: 190px;
+}
+
+.artboard-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.artboard-actions button {
+  background: rgba(215, 227, 244, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: #d7e3f4;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 9px;
+}
+
+.artboard-actions button:hover:not(:disabled) {
+  border-color: #7aa2d8;
+}
+
+.artboard-detail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #b9c9dd;
+}
+
+.artboard-detail .chip {
+  width: 18px;
+  height: 14px;
+  padding: 0;
+  border-radius: 3px;
+}
+
+.link {
+  background: none;
+  border: none;
+  color: #9fd0ff;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline dotted;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
