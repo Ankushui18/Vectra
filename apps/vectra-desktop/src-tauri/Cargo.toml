@@ -1,0 +1,55 @@
+[package]
+name = "vectra-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "VECTRA desktop host: Tauri v2 shell around the WASM engine, with native .vectra file I/O (Task 10.0)"
+
+# Its own workspace root on purpose.
+#
+# The engine workspace (`/Cargo.toml`, 13 members) is the *product*: it is what
+# `cargo test --workspace`, clippy and the wasm build run against, and it must
+# stay buildable with a plain Rust toolchain. Tauri brings ~400 crates (a window,
+# a WebView, a bundler) that none of those gates need. So the host lives in its
+# own workspace and reaches the product through **path dependencies** — the same
+# crates, built from the same files, with no duplication and no coupling.
+[workspace]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+# ── The engine, exactly as the web build uses it ───────────────────────
+#
+# `vectra-wasm` compiles natively: its own test suite has always run on the
+# host, and the WebView still loads the wasm build of these same sources. The
+# desktop host drives the *identical* `VectraEngine` type — which is why a
+# document behaves the same in both, and why no engine crate needed a line of
+# change for this task.
+vectra-wasm = { path = "../../../crates/vectra-wasm" }
+vectra-core = { path = "../../../crates/vectra-core" }
+
+# The `.vectra` container (RULE 3) and the Document → Command replay plan.
+vectra-file = { path = "../../../crates/vectra-file" }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Release tuning for a desktop app: small, stripped, link-time optimised.
+#
+# `lto = "thin"` rather than `= true` on purpose. Fat LTO with
+# `codegen-units = 1` is the recommended Tauri setting *if the build machine has
+# the memory for it* — this one does not (the first release build here was
+# SIGKILLed by the kernel inside `rustc --crate-name gtk`: ~1 GB of RAM against a
+# dependency graph that wants several). Thin LTO keeps most of the win, a fraction
+# of the peak memory, and compiles in parallel, which is the right trade for a
+# repository that has to build on a small box as well as a big one.
+[profile.release]
+codegen-units = 4
+lto = "thin"
+opt-level = "s"
+strip = true
