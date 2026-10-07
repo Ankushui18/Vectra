@@ -44,6 +44,16 @@ use crate::scene::{EvaluatedPrimitive, EvaluatedScene};
 use geo::{BooleanOps, Contains, Coord, LineString, MultiPolygon, Polygon};
 use vectra_core::NodeId;
 
+/// One arc of a ring, as the splitter returns it: the points from one cut to the
+/// next, the first being the cut itself.
+pub type RingArc = Vec<(f64, f64)>;
+
+/// The length of a `geo` offset: `Coord` has `Sub` but no `norm`, and a local
+/// helper is clearer than spelling the hypot out at eleven call sites.
+fn norm(offset: Coord<f64>) -> f64 {
+    offset.x.hypot(offset.y)
+}
+
 /// Distance below which two points (or two arc positions) are the same point.
 ///
 /// The Region Graph compares *intersections*: the same crossing found by two
@@ -72,7 +82,7 @@ impl SourceSpec {
     pub fn from_primitive(id: NodeId, primitive: &EvaluatedPrimitive) -> Option<Self> {
         let path = primitive_to_path(primitive);
         let region = path_to_multi_polygon(&path)?;
-        if region.is_empty() {
+        if region.0.is_empty() {
             return None;
         }
         Some(Self { id, region })
@@ -95,7 +105,13 @@ pub fn sources_of(scene: &EvaluatedScene, ids: &[NodeId]) -> Vec<SourceSpec> {
 
 /// One face of the arrangement: a region plus the answer to "inside which
 /// sources is it?".
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `PartialEq` is written out rather than derived because `lyon::path::Path` —
+/// the face's *rendering* of its own region — does not implement it. Two faces
+/// are equal when their regions, signatures, areas and hole counts are; the
+/// cached path is a function of those, so comparing it would be comparing the
+/// same thing twice.
+#[derive(Debug, Clone)]
 pub struct RegionFace {
     /// The face as a region, holes included.
     pub region: MultiPolygon<f64>,
@@ -108,6 +124,12 @@ pub struct RegionFace {
     pub holes: usize,
     /// The face as a closed lyon path — what the evaluator publishes.
     pub path: lyon::path::Path,
+}
+
+impl PartialEq for RegionFace {
+    fn eq(&self, other: &Self) -> bool {
+        self.members == other.members && self.area == other.area && self.holes == other.holes
+    }
 }
 
 impl RegionFace {
@@ -164,7 +186,7 @@ pub fn atoms(specs: &[SourceSpec]) -> Vec<(MultiPolygon<f64>, Vec<bool>)> {
                 acc.union(&other.region)
             });
         let fresh = canonical(&spec.region.difference(&already));
-        if !fresh.is_empty() {
+        if !fresh.0.is_empty() {
             let mut members = vec![false; n];
             members[index] = true;
             merge_atom(&mut atoms, fresh, members);
@@ -175,15 +197,21 @@ pub fn atoms(specs: &[SourceSpec]) -> Vec<(MultiPolygon<f64>, Vec<bool>)> {
         let mut refined: Vec<(MultiPolygon<f64>, Vec<bool>)> = Vec::with_capacity(atoms.len() * 2);
         for (region, members) in atoms.drain(..) {
             let inside = canonical(&region.intersection(&spec.region));
-            if !inside.is_empty() {
+            if !inside.0.is_empty() {
                 let mut members_inside = members.clone();
                 members_inside[index] = true;
                 merge_atom(&mut refined, inside, members_inside);
             }
             let outside = canonical(&region.difference(&spec.region));
-            if !outside.is_empty() {
-                let mut members_outside = members;
-                members_outside[index] = false;
+            let mut members_outside = members;
+            members_outside[index] = false;
+            // A signature with no `true` in it is not a face. Subtracting a
+            // source from a region it already contains is numerically empty but
+            // an overlay can still leave a sliver behind — a few ulps of area —
+            // and "inside nothing" is not somewhere a designer can drop a fill.
+            // (An arrangement of *real* regions always leaves every point
+            // inside at least one of them, so nothing legitimate is dropped.)
+            if !outside.0.is_empty() && members_outside.iter().any(|inside| *inside) {
                 merge_atom(&mut refined, outside, members_outside);
             }
         }
@@ -243,14 +271,19 @@ pub struct Crossing {
 /// One arc of a source's outline between two consecutive crossings — the
 /// **span** a designer selects and breaks.
 ///
-/// `from`/`to` are arc lengths along the source's outline; `start`/`end` are
-/// the points there, which is what the overlay draws and what the break
-/// command cuts at.
+/// `from`/`to` are arc lengths along the source's outline, each in
+/// `[0, total)`: the arc runs *forward* from `from`, so a span that crosses the
+/// outline's own start point reports `to < from` (see [`Span::length`] for the
+/// distance actually travelled). `start`/`end` are the points there, which is
+/// what the overlay draws and what the break command cuts at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     /// The node whose outline this span belongs to.
     pub source: NodeId,
+    /// The outline position the arc begins at, in `[0, total)`.
     pub from: f64,
+    /// The outline position the arc ends at, in `[0, total)` — *not* `from`
+    /// plus the length when the arc wraps the outline's start point.
     pub to: f64,
     pub start: (f64, f64),
     pub end: (f64, f64),
@@ -278,12 +311,18 @@ pub fn path_rings(path: &lyon::path::Path) -> Vec<Vec<Coord<f64>>> {
         match event {
             lyon::path::Event::Begin { at } => {
                 ring.clear();
-                ring.push(Coord::new(at.x as f64, at.y as f64));
+                ring.push(Coord {
+                    x: at.x as f64,
+                    y: at.y as f64,
+                });
             }
             lyon::path::Event::Line { to, .. }
             | lyon::path::Event::Quadratic { to, .. }
             | lyon::path::Event::Cubic { to, .. } => {
-                ring.push(Coord::new(to.x as f64, to.y as f64));
+                ring.push(Coord {
+                    x: to.x as f64,
+                    y: to.y as f64,
+                });
             }
             lyon::path::Event::End { .. } => {
                 push_ring(&mut rings, &mut ring);
@@ -304,11 +343,20 @@ fn push_ring(rings: &mut Vec<Vec<Coord<f64>>>, ring: &mut Vec<Coord<f64>>) {
     ring.clear();
 }
 
-/// The rings of a scene node, or none when it is not in the scene.
+/// The rings a source's spans are measured on, or none when the id is not a
+/// region in the scene.
+///
+/// These are the **canonical** rings — the same outline `RegionGraph` builds its
+/// crossings and spans from — and not the node's authored path. Resolving a path
+/// to a region normalises it (a ring may start at a different vertex), so every
+/// arc position a plan reports is stated in *these* ring's terms; handing
+/// `ring_pieces_between` the authored path instead would cut at the right
+/// distance along the wrong outline.
 pub fn source_rings(scene: &EvaluatedScene, id: NodeId) -> Vec<Vec<Coord<f64>>> {
     scene
         .get(id)
-        .map(|node| path_rings(&primitive_to_path(&node.primitive)))
+        .and_then(|node| SourceSpec::from_primitive(id, &node.primitive))
+        .map(|source| path_rings(&multi_polygon_to_path(&source.region)))
         .unwrap_or_default()
 }
 
@@ -331,7 +379,7 @@ pub fn ring_crossings(a: &[Coord<f64>], b: &[Coord<f64>]) -> Vec<(f64, f64, (f64
     for i in 0..a.len() {
         let p = a[i];
         let q = a[(i + 1) % a.len()];
-        let seg_a = (q - p).norm();
+        let seg_a = norm(q - p);
         if seg_a <= REGION_EPSILON {
             continue;
         }
@@ -339,7 +387,7 @@ pub fn ring_crossings(a: &[Coord<f64>], b: &[Coord<f64>]) -> Vec<(f64, f64, (f64
         for j in 0..b.len() {
             let r = b[j];
             let s = b[(j + 1) % b.len()];
-            let seg_b = (s - r).norm();
+            let seg_b = norm(s - r);
             if seg_b <= REGION_EPSILON {
                 continue;
             }
@@ -357,9 +405,9 @@ pub fn ring_crossings(a: &[Coord<f64>], b: &[Coord<f64>]) -> Vec<(f64, f64, (f64
     found.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut unique: Vec<(f64, f64, (f64, f64))> = Vec::new();
     for hit in found {
-        let duplicate = unique.iter().any(|kept| {
-            (kept.2 .0 - hit.2 .0).hypot(kept.2 .1 - hit.2 .1) <= REGION_EPSILON
-        });
+        let duplicate = unique
+            .iter()
+            .any(|kept| (kept.2 .0 - hit.2 .0).hypot(kept.2 .1 - hit.2 .1) <= REGION_EPSILON);
         if !duplicate {
             unique.push(hit);
         }
@@ -384,7 +432,8 @@ fn segment_hit(p: Coord<f64>, q: Coord<f64>, r: Coord<f64>, s: Coord<f64>) -> Op
     let t = (offset.x * d2.y - offset.y * d2.x) / denominator;
     let u = (offset.x * d1.y - offset.y * d1.x) / denominator;
     let tolerance = 1e-9;
-    if !(-tolerance..=1.0 + tolerance).contains(&t) || !(-tolerance..=1.0 + tolerance).contains(&u) {
+    if !(-tolerance..=1.0 + tolerance).contains(&t) || !(-tolerance..=1.0 + tolerance).contains(&u)
+    {
         return None;
     }
     let t = t.clamp(0.0, 1.0);
@@ -413,7 +462,7 @@ fn ring_length(ring: &[Coord<f64>]) -> f64 {
         .map(|i| {
             let p = ring[i];
             let q = ring[(i + 1) % ring.len()];
-            (q - p).norm()
+            norm(q - p)
         })
         .sum()
 }
@@ -428,7 +477,7 @@ pub fn ring_point_at(ring: &[Coord<f64>], distance: f64) -> (f64, f64) {
     for i in 0..ring.len() {
         let p = ring[i];
         let q = ring[(i + 1) % ring.len()];
-        let segment = (q - p).norm();
+        let segment = norm(q - p);
         if segment <= REGION_EPSILON {
             continue;
         }
@@ -488,9 +537,7 @@ pub fn crossings(specs: &[SourceSpec], rings: &[Vec<Vec<Coord<f64>>>]) -> Vec<Cr
             })
             .then_with(|| x.a.partial_cmp(&y.a).unwrap_or(std::cmp::Ordering::Equal))
     });
-    all.dedup_by(|x, y| {
-        (x.point.0 - y.point.0).hypot(x.point.1 - y.point.1) <= REGION_EPSILON
-    });
+    all.dedup_by(|x, y| (x.point.0 - y.point.0).hypot(x.point.1 - y.point.1) <= REGION_EPSILON);
     all
 }
 
@@ -547,10 +594,7 @@ pub fn spans_of(
         return Vec::new();
     }
     // One cut per arc position, in outline order.
-    let mut ordered: Vec<(f64, usize)> = cuts
-        .into_iter()
-        .zip(ring_of_cut)
-        .collect();
+    let mut ordered: Vec<(f64, usize)> = cuts.into_iter().zip(ring_of_cut).collect();
     ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     ordered.dedup_by(|a, b| (a.0 - b.0).abs() <= REGION_EPSILON);
 
@@ -600,15 +644,24 @@ fn span_at(
     ring: usize,
     total: f64,
 ) -> Span {
+    // `to` arrives unwrapped when the span runs past the outline's end — that
+    // is how `spans_of` measures the closing arc — so the *distance travelled*
+    // is taken before the position is brought back into `[0, total)`.
+    let length = to - from;
+    let at = if total > REGION_EPSILON {
+        to.rem_euclid(total)
+    } else {
+        to
+    };
     let start = point_on_rings(rings, from);
-    let end = point_on_rings(rings, to);
+    let end = point_on_rings(rings, at);
     Span {
         source: id,
         from,
-        to,
+        to: at,
         start,
         end,
-        length: to - from,
+        length,
         ring,
         total,
     }
@@ -627,19 +680,23 @@ fn span_at(
 /// `from` and `to` are arc lengths *within the ring* (see [`Span::from`] for the
 /// outline-relative positions the graph reports); `to` may wrap past the ring's
 /// length, which is the span that crosses the ring's start point.
-pub fn ring_pieces_between(
-    ring: &[Coord<f64>],
-    from: f64,
-    to: f64,
-) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+pub fn ring_pieces_between(ring: &[Coord<f64>], from: f64, to: f64) -> (RingArc, RingArc) {
     let forward = walk_ring(ring, from, to);
     let back = walk_ring(ring, to, from);
     (forward, back)
 }
 
 /// The points along `ring` from arc length `from` to arc length `to`, walking
-/// forward and collecting the ring vertices in between.
-fn walk_ring(ring: &[Coord<f64>], from: f64, to: f64) -> Vec<(f64, f64)> {
+/// forward and collecting the ring vertices in between **in the order the walk
+/// meets them**.
+///
+/// The ring is a cycle, so the arc may start part-way through it and reach the
+/// ring's own start point before it is done: the vertices are therefore ordered
+/// by their forward distance from `from`, not by their index in the ring. (An
+/// arc that wraps would otherwise emit the ring's opening vertices first and
+/// then jump back for the ones after the cut — a piece that is still the right
+/// *set* of points and no longer the right *shape*.)
+fn walk_ring(ring: &[Coord<f64>], from: f64, to: f64) -> RingArc {
     let total = ring_length(ring);
     if total <= REGION_EPSILON || ring.is_empty() {
         return Vec::new();
@@ -648,30 +705,49 @@ fn walk_ring(ring: &[Coord<f64>], from: f64, to: f64) -> Vec<(f64, f64)> {
     if span <= REGION_EPSILON {
         return Vec::new();
     }
-    let mut points = vec![ring_point_at(ring, from)];
-    let mut walked = 0.0;
+    // Arc length at each vertex, walking the ring once from its own start.
+    let mut walked: Vec<f64> = Vec::with_capacity(ring.len());
+    let mut at = 0.0;
     for index in 0..ring.len() {
+        walked.push(at);
         let p = ring[index];
         let q = ring[(index + 1) % ring.len()];
-        let segment = (q - p).norm();
-        if segment <= REGION_EPSILON {
-            continue;
+        at += norm(q - p);
+    }
+    let mut inside: Vec<(f64, usize)> = Vec::new();
+    for (index, distance) in walked.iter().enumerate() {
+        // How far forward from the cut this vertex is: strictly inside the arc
+        // means strictly between the two cut points, going forward.
+        let forward = (distance - from).rem_euclid(total);
+        if forward > REGION_EPSILON && forward < span - REGION_EPSILON {
+            inside.push((forward, index));
         }
-        walked += segment;
-        // The vertex at the end of this segment is *inside* the arc when its
-        // forward distance from `from` is strictly between the two cuts.
-        let relative = (walked - from).rem_euclid(total);
-        if relative > REGION_EPSILON && relative < span - REGION_EPSILON {
-            points.push((q.x, q.y));
-        }
+    }
+    inside.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut points: RingArc = vec![ring_point_at(ring, from)];
+    for (_, index) in inside {
+        points.push((ring[index].x, ring[index].y));
     }
     points.push(ring_point_at(ring, to));
     points
 }
 
 /// The point at arc length `distance` along the outline (ring-major order).
+///
+/// An outline is a cycle, so the distance is taken modulo the outline's total
+/// length: the position `total` is the start again, and the closing arc of a
+/// partitioned outline (which `spans_of` measures past the end) lands where it
+/// began.
 pub fn point_on_rings(rings: &[Vec<Coord<f64>>], distance: f64) -> (f64, f64) {
-    let mut remaining = distance;
+    let total: f64 = rings.iter().map(|ring| ring_length(ring)).sum();
+    if total <= REGION_EPSILON {
+        return rings
+            .first()
+            .and_then(|ring| ring.first())
+            .map(|c| (c.x, c.y))
+            .unwrap_or((0.0, 0.0));
+    }
+    let mut remaining = distance.rem_euclid(total);
     for ring in rings {
         let length = ring_length(ring);
         if remaining <= length {
@@ -835,16 +911,6 @@ mod tests {
         }
     }
 
-    fn circle_area(r: f64) -> f64 {
-        // The flattened circle's own area — what the region graph sees, not the
-        // analytic πr² (a 64-segment polygon is 0.16% smaller).
-        crate::convert::path_area(&primitive_to_path(&EvaluatedPrimitive::Circle {
-            cx: 0.0,
-            cy: 0.0,
-            r,
-        }))
-    }
-
     /// **The Region Detection Law** (Task 12.0): two overlapping circles
     /// produce **exactly three** distinct regions — `A \ B`, `A ∩ B`, `B \ A` —
     /// with one atom per signature, in signature order, and the middle one
@@ -859,8 +925,8 @@ mod tests {
         let signatures: Vec<Vec<bool>> = graph.faces.iter().map(|f| f.members.clone()).collect();
         assert_eq!(
             signatures,
-            vec![vec![true, false], vec![true, true], vec![false, true]],
-            "one atom per signature, in signature order"
+            vec![vec![false, true], vec![true, false], vec![true, true]],
+            "one atom per signature, in signature order (`false` sorts first)"
         );
 
         // The middle face is the overlap, and it is *inside both* — the one
@@ -873,13 +939,10 @@ mod tests {
         let lens = graph
             .crossings
             .iter()
-            .filter(|crossing| {
-                crossing.a.is_finite() && crossing.b.is_finite()
-            })
+            .filter(|crossing| crossing.a.is_finite() && crossing.b.is_finite())
             .count();
         assert_eq!(
-            lens,
-            2,
+            lens, 2,
             "two circles cross at two points: {:?}",
             graph.crossings
         );
@@ -917,12 +980,17 @@ mod tests {
         let crescent = (10.0, 0.0);
         let index = graph.face_at(crescent).expect("a face under A's crescent");
         assert_eq!(graph.faces[index].members, [true, false]);
-        assert!(graph.face_at((1000.0, 1000.0)).is_none(), "empty space has no face");
+        assert!(
+            graph.face_at((1000.0, 1000.0)).is_none(),
+            "empty space has no face"
+        );
     }
 
     /// A **hole stays a hole**: a donut and a bar through it produce regions
-    /// whose middles are holes, and every face's path is closed with the hole
-    /// wound the other way — fillable under both fill rules.
+    /// whose middles are holes, and every face's path is a clean closed path
+    /// whose two rings are nested so that the inner one *subtracts* — the
+    /// renderer's `EvenOdd` rule (`vectra-render`'s `FILL_RULE`), which is the
+    /// rule the graph's own `path_to_multi_polygon` canonicalises under too.
     #[test]
     fn holes_remain_holes_in_every_face() {
         // A 100×100 square, and a 40×40 square punched out of the middle, as
@@ -954,26 +1022,49 @@ mod tests {
             .find(|face| face.members == [true, false])
             .expect("the donut");
         assert_eq!(donut_face.holes, 1, "the hole survived the arrangement");
-        assert!((donut_face.area - (100.0 * 100.0 - 40.0 * 40.0)).abs() < 1e-6);
+        // The face is the donut *minus the bar*: the bar crosses the frame, and
+        // the slivers it takes out of it are the bar's own face. So the area is
+        // the donut's (the square less its hole) less that overlap — measured
+        // here with the overlay, not assumed.
+        let frame_overlap = crate::convert::region_area(&donut.region.intersection(&bar.region));
+        assert!(frame_overlap > 0.0, "the bar really crosses the frame");
+        assert!(
+            (donut_face.area - (100.0 * 100.0 - 40.0 * 40.0 - frame_overlap)).abs() < 1e-6,
+            "donut face {} vs {} (8400 less {} )",
+            donut_face.area,
+            100.0 * 100.0 - 40.0 * 40.0 - frame_overlap,
+            frame_overlap
+        );
 
-        // The face's path is closed, and its rings are wound opposite ways: the
-        // signature of "a hole" under both `nonzero` and `even-odd`.
+        // The face's path is closed, and the hole *subtracts*: measured under
+        // even-odd (the rule the path is canonicalised with on the way back
+        // in), the face's area is its region's, so the second ring reads as a
+        // hole rather than as a second island of paint.
         let rings = path_rings(&donut_face.path);
-        assert_eq!(rings.len(), 2);
-        let signed = |ring: &[Coord<f64>]| {
+        assert_eq!(rings.len(), 2, "exterior and hole");
+        let unsigned = |ring: &[Coord<f64>]| {
             let mut twice = 0.0;
             for i in 0..ring.len() {
                 let p = ring[i];
                 let q = ring[(i + 1) % ring.len()];
                 twice += p.x * q.y - q.x * p.y;
             }
-            twice / 2.0
+            (twice / 2.0).abs()
         };
+        assert!((unsigned(&rings[0]) - 100.0 * 100.0).abs() < 1e-6);
+        // The hole is the punched square *plus* the slivers the bar cuts out of
+        // the frame — one ring, because the bar's crossing of the frame joins
+        // them.
         assert!(
-            signed(&rings[0]) * signed(&rings[1]) < 0.0,
-            "exterior {:?} and hole {:?} must wind opposite ways",
-            signed(&rings[0]),
-            signed(&rings[1])
+            (unsigned(&rings[1]) - 1800.0).abs() < 1e-4,
+            "the hole ring is {} (the punched square and the bar's slivers)",
+            unsigned(&rings[1])
+        );
+        assert!(
+            (crate::convert::path_area(&donut_face.path) - donut_face.area).abs() < 1e-4,
+            "the hole subtracts: {:?} vs {}",
+            crate::convert::path_area(&donut_face.path),
+            donut_face.area
         );
         // The bar inside the hole is its own face, and the overlap with the
         // donut's *material* is two slivers — the bar crosses the donut's frame.
@@ -983,7 +1074,10 @@ mod tests {
             .find(|face| face.members == [false, true])
             .expect("the bar");
         let bar_area = crate::convert::region_area(&bar.region);
-        assert!(bar_only.area < bar_area, "part of the bar is inside the donut");
+        assert!(
+            bar_only.area < bar_area,
+            "part of the bar is inside the donut"
+        );
     }
 
     /// **Spans**: crossing outlines are cut at their intersections. Two
@@ -1067,12 +1161,15 @@ mod tests {
             );
         }
 
-        // 2. **No gap**: the pieces' arc lengths add up to the whole ring…
+        // 2. **No gap**: the pieces' arc lengths add up to the whole ring.
+        //    Each piece is an *open* polyline — the `Close` segment that makes it
+        //    a fillable path is the shared chord, which belongs to neither arc —
+        //    so the measure leaves the closing step out.
         let arc_length = |piece: &[(f64, f64)]| -> f64 {
             let mut length = 0.0;
-            for index in 0..piece.len() {
-                let p = piece[index];
-                let q = piece[(index + 1) % piece.len()];
+            for index in 1..piece.len() {
+                let p = piece[index - 1];
+                let q = piece[index];
                 length += (q.0 - p.0).hypot(q.1 - p.1);
             }
             length
@@ -1092,6 +1189,7 @@ mod tests {
 
         // 3. **They are closed regions**: the area the two pieces enclose adds
         //    up to the circle's (a polygon split by a chord, exactly).
+        // The areas, in contrast, *are* the closed shapes' — arc plus chord.
         let ring_polygon_area = |piece: &[(f64, f64)]| -> f64 {
             let mut twice = 0.0;
             for index in 0..piece.len() {
@@ -1106,7 +1204,7 @@ mod tests {
             (ring_polygon_area(&piece_a) + ring_polygon_area(&piece_b)
                 - crate::convert::path_area(&circle_path))
             .abs()
-                < 1e-6,
+                < 1e-4,
             "the two pieces tile the ring"
         );
 
@@ -1139,7 +1237,10 @@ mod tests {
             .iter()
             .find(|face| face.members == [true, false])
             .expect("the frame");
-        assert_eq!(outer_face.holes, 1, "the inner square is a hole in the frame");
+        assert_eq!(
+            outer_face.holes, 1,
+            "the inner square is a hole in the frame"
+        );
         assert!((outer_face.area - 7500.0).abs() < 1e-9);
         // The centre belongs to the inner square, not the frame.
         let index = graph.face_at((50.0, 50.0)).expect("a face");

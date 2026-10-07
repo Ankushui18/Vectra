@@ -6,6 +6,7 @@
 //! remote control; the engine owns all mutation.
 
 use crate::constraint::Constraint;
+use crate::document::StyleProperties;
 use crate::document::{Document, MotionTrack, Node, NodeKind, PathSegment, TextAlign};
 use crate::error::VectraError;
 use crate::geom::{Color, Point2};
@@ -17,7 +18,6 @@ use crate::layers::LayerRecord;
 use crate::operation::{OperationKind, OperationNode};
 use crate::param::{MotionBinding, NodeOutputId, ParamValue, Parameter};
 use crate::procedural::ProceduralNode;
-use crate::document::StyleProperties;
 use crate::style::AppearanceLayer;
 use serde::{Deserialize, Serialize};
 
@@ -1369,8 +1369,15 @@ impl Command {
                 }
                 for input in inputs {
                     // The sources must exist — a virtual shape over a missing
-                    // node is not a shape. Operation-on-operation nesting is
-                    // Phase 2 (see the module note in `operation.rs`).
+                    // node is not a shape. A **Smart Fill names itself** first
+                    // among its inputs: that self-reference is how a write that
+                    // dirties the fill (`SetAppearances`, a new seed) reaches
+                    // the fill's own evaluation, and it is the one id here that
+                    // is not an authored node. Reading *another* operation is
+                    // still Phase 2 (see the module note in `operation.rs`).
+                    if input == id {
+                        continue;
+                    }
                     doc.get_node(*input)?;
                 }
                 if doc.operations.contains(*id) {

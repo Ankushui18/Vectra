@@ -16,12 +16,14 @@
 //!
 //! Run: `cargo test -p vectra-geometry --test region_laws`.
 
-use geo::{Area, BooleanOps};
+use geo::BooleanOps;
+use lyon::path::iterator::PathIterator;
 use proptest::prelude::*;
 use vectra_core::{new_node_id, NodeId};
 use vectra_geometry::{
-    path_area, path_to_multi_polygon, path_rings, primitive_to_path, region_area,
-    ring_pieces_between, EvaluatedPrimitive, RegionGraph, SourceSpec,
+    multi_polygon_to_path, path_area, path_rings, path_to_multi_polygon, primitive_to_path,
+    region_area, ring_pieces_between, EvaluatedPrimitive, RegionGraph, SourceSpec,
+    FLATTEN_TOLERANCE,
 };
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -44,13 +46,16 @@ fn source(cx: f64, cy: f64, r: f64) -> SourceSpec {
 /// The analytic area of the lens of two radius-`r` circles `d` apart:
 /// `2r²cos⁻¹(d/2r) − (d/2)√(4r²−d²)`.
 fn lens_area(r1: f64, r2: f64, d: f64) -> f64 {
-    // r1 ≠ r2 general form, via the two circular segments.
-    let (r, other) = if r1 >= r2 { (r1, r2) } else { (r2, r1) };
-    let a = ((d * d + r * r - other * other) / (2.0 * d * r)).clamp(-1.0, 1.0);
-    let b = ((d * d + other * other - r * r) / (2.0 * d * other)).clamp(-1.0, 1.0);
-    r * r * a.acos() - (d * d + r * r - other * other) / (2.0 * d) * (1.0 - a * a).max(0.0).sqrt()
-        + other * other * b.acos()
-        - (d * d + other * other - r * r) / (2.0 * d) * (1.0 - b * b).max(0.0).sqrt()
+    // The lens is two circular segments: the common chord is at `x1` from the
+    // first centre and `x2` from the second, and a segment of radius `r` cut at
+    // distance `x` measures `r²·acos(x/r) − x·√(r² − x²)`.
+    let x1 = (d * d + r1 * r1 - r2 * r2) / (2.0 * d);
+    let x2 = d - x1;
+    let segment = |r: f64, x: f64| -> f64 {
+        let x = x.clamp(-r, r);
+        r * r * (x / r).clamp(-1.0, 1.0).acos() - x * (r * r - x * x).max(0.0).sqrt()
+    };
+    segment(r1, x1) + segment(r2, x2)
 }
 
 /// Two circles that overlap *properly*: neither contains the other, neither is
@@ -60,6 +65,14 @@ fn overlapping(r1: f64, r2: f64, t: f64) -> f64 {
     let inner = (r1 - r2).abs();
     let outer = r1 + r2;
     inner + (0.05 + 0.90 * t) * (outer - inner)
+}
+
+/// `t` for the *closed-form* comparisons: away from tangency, where a lens is
+/// thick enough that the polygon chords' budget is a few tenths of a percent
+/// and the closed form is a meaningful yardstick. The overlay cross-check holds
+/// across the whole range — it compares the same polygons with the same rule.
+fn proper(t: f64) -> f64 {
+    0.15 + 0.7 * t
 }
 
 /// A ring's total arc length — the splitter's own measure, computed here
@@ -87,14 +100,15 @@ fn shoelace(points: &[(f64, f64)]) -> f64 {
     twice.abs() / 2.0
 }
 
-/// The arc length of a point list.
+/// The arc length of a point list, as an **open** polyline.
+///
+/// A piece is drawn as `M … Z`: the closing segment is the chord the two pieces
+/// share, so the ring's arc length is the sum over the drawn segments only —
+/// the closing step would count that chord twice and is not part of either arc.
 fn arc_length(points: &[(f64, f64)]) -> f64 {
-    (0..points.len())
-        .map(|index| {
-            let p = points[index];
-            let q = points[(index + 1) % points.len()];
-            (q.0 - p.0).hypot(q.1 - p.1)
-        })
+    points
+        .windows(2)
+        .map(|pair| (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1))
         .sum()
 }
 
@@ -116,7 +130,7 @@ proptest! {
         r2 in 20.0f64..100.0,
         t in 0.0f64..1.0,
     ) {
-        let d = overlapping(r1, r2, t);
+        let d = overlapping(r1, r2, proper(t));
         let graph = RegionGraph::build(vec![source(0.0, 0.0, r1), source(d, 0.0, r2)]);
 
         // 1. **Exactly three faces, one per signature.** The background (outside
@@ -139,34 +153,60 @@ proptest! {
         let overlap = region_area(&ra.intersection(rb));
         let union = region_area(&ra.union(rb));
         prop_assert!(
-            (lens.area - overlap).abs() < 1e-6,
+            (lens.area - overlap).abs() <= 1e-6 + 1e-8 * overlap,
             "lens {} vs the overlay's overlap {}",
             lens.area,
             overlap
         );
+        // The circles in the scene are the picture's polygons, not the ideal
+        // curves: their chords cut the lens's corners, so the graph's lens is
+        // *inside* the closed form by the flattening's own budget (a few parts
+        // in a thousand) and never outside it.
+        let closed_form = lens_area(r1, r2, d);
         prop_assert!(
-            (lens.area - lens_area(r1, r2, d)).abs() / lens.area < 1e-3,
+            (closed_form - lens.area).abs() / closed_form < 2e-2,
             "lens {} vs the closed form {}",
             lens.area,
-            lens_area(r1, r2, d)
+            closed_form
         );
+        prop_assert!(lens.area <= closed_form + 1e-6, "flattening shrinks, never grows");
         prop_assert!(
-            (only_a.area + only_b.area + lens.area - union).abs() < 1e-6,
+            (only_a.area + only_b.area + lens.area - union).abs() <= 1e-6 + 1e-8 * union,
             "the faces {} + {} + {} partition the union {}",
             only_a.area,
             only_b.area,
             lens.area,
             union
         );
-        // The pieces tile each source: A only + the lens *is* A.
-        prop_assert!((only_a.area + lens.area - ra.area()).abs() < 1e-6);
-        prop_assert!((only_b.area + lens.area - rb.area()).abs() < 1e-6);
+        // The pieces tile each source: A only + the lens *is* A. Again two
+        // boolean runs added up, so the budget is parts in a hundred million
+        // rather than a bit-for-bit match.
+        let area_a = region_area(ra);
+        let area_b = region_area(rb);
+        prop_assert!(
+            (only_a.area + lens.area - area_a).abs() <= 1e-6 + 1e-8 * area_a,
+            "A only {} + lens {} vs A {}",
+            only_a.area,
+            lens.area,
+            area_a
+        );
+        prop_assert!(
+            (only_b.area + lens.area - area_b).abs() <= 1e-6 + 1e-8 * area_b,
+            "B only {} + lens {} vs B {}",
+            only_b.area,
+            lens.area,
+            area_b
+        );
 
-        // 3. **The drop test.** The midpoint of the two centres is in the lens
-        //    and nowhere else; a point beyond both centres is in no face at all.
-        let midline = (d / 2.0, 0.0);
+        // 3. **The drop test.** The midpoint of the lens's common chord — where
+        //    the chord meets the line of centres — is inside both circles and
+        //    nowhere else. (Not `d/2`: with different radii the midpoint of the
+        //    centres can sit outside the smaller circle, which is exactly the
+        //    case a drop test has to get right.) A point beyond both centres is
+        //    in no face at all.
+        let chord = (d * d + r1 * r1 - r2 * r2) / (2.0 * d);
         prop_assert_eq!(
-            graph.face_at(midline),
+            graph.face_at((chord, 0.0)),
             Some(graph.faces.iter().position(|f| f.members == [true, true]).unwrap())
         );
         prop_assert_eq!(graph.face_at((d / 2.0, r1 + r2)), None);
@@ -209,23 +249,38 @@ proptest! {
             prop_assert!(!rings.is_empty(), "a face has at least one ring");
             for ring in &rings {
                 prop_assert!(ring.len() >= 3, "a ring is a polygon");
-                let first = ring[0];
-                let last = ring[ring.len() - 1];
-                prop_assert!(
-                    (first.x - last.x).abs() < 1e-6 && (first.y - last.y).abs() < 1e-6,
-                    "the ring closes: {first:?} … {last:?}"
-                );
             }
+            // …and every subpath is *closed*: `path_rings` reports a subpath's
+            // points without repeating the first one, and it is the `Close` the
+            // fill and the hole-parity both depend on, so read it off the path
+            // rather than inferring it from the last point.
+            let mut all_closed = true;
+            for event in face.path.iter().flattened(FLATTEN_TOLERANCE) {
+                if let lyon::path::Event::End { close, .. } = event {
+                    all_closed &= close;
+                }
+            }
+            prop_assert!(all_closed, "every subpath of a face closes");
             // Two functions, one area: the path the evaluator publishes and the
             // region the graph measured.
             let from_path = path_area(&face.path);
+            // The path is what the renderer draws: `lyon` points are `f32`, so
+            // re-entering the region through the path rounds every coordinate.
+            // The budget is a relative one — parts in ten million of the area —
+            // which is far below a pixel and far above the rounding.
             prop_assert!(
-                (from_path - face.area).abs() < 1e-6,
+                (from_path - face.area).abs() <= 1e-4 + 1e-6 * face.area,
                 "path area {from_path} vs region area {}",
                 face.area
             );
         }
-        prop_assert!((total - union).abs() < 1e-6, "faces {total} vs union {union}");
+        // Parts in a hundred million: the atoms and the union are *different*
+        // boolean runs, so the guarantee is that they cut the same plane, not
+        // that they round identically.
+        prop_assert!(
+            (total - union).abs() <= 1e-6 + 1e-8 * union,
+            "faces {total} vs union {union}"
+        );
     }
 
     /// **The Region Detection Law, nested.** A source strictly inside another is
@@ -244,37 +299,49 @@ proptest! {
         let graph = RegionGraph::build(vec![source(0.0, 0.0, outer_r), source(cx, cy, inner_r)]);
         prop_assert_eq!(graph.faces.len(), 2);
         let outer = graph.faces.iter().find(|f| f.members == [true, false]).expect("the frame");
-        let inner = graph.faces.iter().find(|f| f.members == [false, true]).expect("the inset");
+        // The inset is inside the host *and* itself: `[true, false]` would mean
+        // "inside the host's index only", which no part of it is.
+        let inner = graph.faces.iter().find(|f| f.members == [true, true]).expect("the inset");
         prop_assert_eq!(outer.holes, 1, "the frame has a hole where the inset is");
         prop_assert_eq!(inner.holes, 0);
-        prop_assert!((inner.area - circle_region(cx, cy, inner_r).area()).abs() < 1e-6);
-
-        // A hole is a hole: the frame's outer ring and its hole wind opposite
-        // ways, which is what makes the region subtract rather than add under
-        // both fill rules.
-        let rings = path_rings(&outer.path);
-        prop_assert_eq!(rings.len(), 2);
-        let signed = |ring: &[geo::Coord<f64>]| -> f64 {
-            let mut twice = 0.0;
-            for index in 0..ring.len() {
-                let p = ring[index];
-                let q = ring[(index + 1) % ring.len()];
-                twice += p.x * q.y - q.x * p.y;
-            }
-            twice / 2.0
-        };
+        // The inset's face is the inset: `outer ∩ inner` over regions that
+        // contain one another is the inner region, up to the overlay's own
+        // rounding (which is why the budget is relative, not absolute).
+        let inset_area = region_area(&circle_region(cx, cy, inner_r));
         prop_assert!(
-            signed(&rings[0]) * signed(&rings[1]) < 0.0,
-            "exterior {:?} vs hole {:?}",
-            signed(&rings[0]),
-            signed(&rings[1])
+            (inner.area - inset_area).abs() <= 1e-6 + 1e-8 * inset_area,
+            "the inset's face {} vs the inset {}",
+            inner.area,
+            inset_area
+        );
+
+        // A hole is a hole: the frame's path has two rings — the outer one and
+        // the inner one — and under the renderer's rule (`EvenOdd`, which is
+        // also the rule `path_to_multi_polygon` canonicalises with) the inner
+        // one *subtracts*. That is the whole claim: the frame's published path
+        // measures as the frame, not as the outer circle.
+        let rings = path_rings(&outer.path);
+        prop_assert_eq!(rings.len(), 2, "an exterior and a hole");
+        let path_area_of_frame = path_area(&outer.path);
+        prop_assert!(
+            (path_area_of_frame - outer.area).abs() <= 1e-4 + 1e-6 * outer.area,
+            "the frame's path is the frame: {path_area_of_frame} vs {}",
+            outer.area
+        );
+        prop_assert!(
+            (outer.area - (region_area(&graph.sources[0].region) - inner.area)).abs()
+                <= 1e-6 + 1e-8 * outer.area,
+            "the frame is the host less the inset: {} vs {} − {}",
+            outer.area,
+            region_area(&graph.sources[0].region),
+            inner.area
         );
 
         // The drop test answers *inside* the hole with the inner face, not with
         // the frame that surrounds it: the smallest face wins.
         prop_assert_eq!(
             graph.face_at((cx, cy)),
-            Some(graph.faces.iter().position(|f| f.members == [false, true]).unwrap())
+            Some(graph.faces.iter().position(|f| f.members == [true, true]).unwrap())
         );
     }
 }
@@ -301,8 +368,9 @@ proptest! {
         prop_assert_eq!(spans.len(), 2);
         let span = spans[span_index];
 
-        // The ring the span lives on, as the graph reports it.
-        let rings = path_rings(&graph.faces[0].path);
+        // The ring the span lives on: the source's own outline, which is what
+        // the span's arc positions were measured along.
+        let rings = path_rings(&multi_polygon_to_path(&graph.sources[0].region));
         prop_assert!(!rings.is_empty());
         let (piece_a, piece_b) = ring_pieces_between(&rings[span.ring], span.from, span.to);
         prop_assert!(piece_a.len() >= 2 && piece_b.len() >= 2, "both pieces draw");
@@ -334,7 +402,7 @@ proptest! {
         // 3. **Both halves are regions**: their areas add up to the circle's, by
         //    a second area implementation (the shoelace formula).
         prop_assert!(
-            (shoelace(&piece_a) + shoelace(&piece_b) - circle_region(0.0, 0.0, r1).area()).abs()
+            (shoelace(&piece_a) + shoelace(&piece_b) - region_area(&circle_region(0.0, 0.0, r1))).abs()
                 < 1e-6,
             "the pieces tile the ring"
         );
@@ -371,10 +439,13 @@ proptest! {
         prop_assert!((arc_length(&b) - (perimeter - side * 1.5)).abs() < 1e-6);
         prop_assert!((shoelace(&a) + shoelace(&b) - side * side).abs() < 1e-6);
 
-        // The wrapped case: the same span named the other way round.
+        // The wrapped case: the same two cuts named the other way round. The
+        // first piece is the complementary arc, and `from + perimeter` is the
+        // same point as `from` — a `to` past the ring's end is still an arc.
         let (a2, b2) = ring_pieces_between(&ring, to, from + perimeter);
-        prop_assert!((arc_length(&a2) - side * 1.5).abs() < 1e-6);
-        prop_assert!((arc_length(&b2) - (perimeter - side * 1.5)).abs() < 1e-6);
+        prop_assert!((arc_length(&a2) - (perimeter - side * 1.5)).abs() < 1e-6);
+        prop_assert!((arc_length(&b2) - side * 1.5).abs() < 1e-6);
+        prop_assert!((shoelace(&a2) + shoelace(&b2) - side * side).abs() < 1e-6);
     }
 }
 

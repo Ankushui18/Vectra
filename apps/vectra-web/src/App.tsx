@@ -1055,6 +1055,36 @@ export default function App() {
     modifierClickRef.current = null;
   }, []);
 
+  /** Client pixels → document coordinates, asked of the renderer (Task 5.0).
+   *  The canvas owns the camera, so the mapping the pointer gets is the mapping
+   *  the pixels were drawn with — this file does no transform arithmetic. */
+  const docPoint = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } | null =>
+      client?.pointerDoc(clientX, clientY) ?? null,
+    [client],
+  );
+
+  /**
+   * **Ask the engine which face is under a client point** (Task 12.0 RULE 1).
+   *
+   * The ids are `[]`, which the engine reads as RULE 1's own sentence: the
+   * selection when there is one, else the active layer's shapes. This file
+   * therefore decides no boundary set of its own — and the point is mapped to
+   * document units by the renderer's camera, so the region graph is asked about
+   * the coordinates the geometry is actually in.
+   */
+  const probeRegion = useCallback(
+    (clientX: number, clientY: number): RegionPlanWire | null => {
+      if (!client) return null;
+      const point = docPoint(clientX, clientY);
+      if (!point) return null;
+      const plan = client.smartFillPlan([], [point.x, point.y]);
+      setRegionPlan(plan);
+      return plan;
+    },
+    [client, docPoint],
+  );
+
   // ── Task 10.7 RULE 4: ColorDrop's drag ────────────────────────────────
   //
   // The well starts the drag; the *window* finishes it, for the same reason a
@@ -1669,15 +1699,6 @@ export default function App() {
     [runConstraint],
   );
 
-  /** Client pixels → document coordinates, asked of the renderer (Task 5.0).
-   *  The canvas owns the camera, so the mapping the pointer gets is the mapping
-   *  the pixels were drawn with — this file does no transform arithmetic. */
-  const docPoint = useCallback(
-    (clientX: number, clientY: number): { x: number; y: number } | null =>
-      client?.pointerDoc(clientX, clientY) ?? null,
-    [client],
-  );
-
   // ── Task 6.0: motion ──────────────────────────────────────────────────
   //
   // Four actions, all of them thin: the anchor, the hit test, the smoothing and
@@ -1822,27 +1843,6 @@ export default function App() {
   }, [client, logResponse, refresh, kick]);
 
   /**
-   * **Ask the engine which face is under a client point** (Task 12.0 RULE 1).
-   *
-   * The ids are `[]`, which the engine reads as RULE 1's own sentence: the
-   * selection when there is one, else the active layer's shapes. This file
-   * therefore decides no boundary set of its own — and the point is mapped to
-   * document units by the renderer's camera, so the region graph is asked about
-   * the coordinates the geometry is actually in.
-   */
-  const probeRegion = useCallback(
-    (clientX: number, clientY: number): RegionPlanWire | null => {
-      if (!client) return null;
-      const point = docPoint(clientX, clientY);
-      if (!point) return null;
-      const plan = client.smartFillPlan([], [point.x, point.y]);
-      setRegionPlan(plan);
-      return plan;
-    },
-    [client, docPoint],
-  );
-
-  /**
    * Task 5.0: a canvas click *names* a layer — the renderer said which one, and
    * the inspector can now edit it. Same two-layer cap as the layer list, so the
    * constraint builders get the pair they expect.
@@ -1858,20 +1858,26 @@ export default function App() {
    * **The selected path's spans** (Task 12.0 RULE 3): what the Region block in
    * the Appearance panel lists and breaks.
    *
-   * Asked of the engine for the selected node alone — `[id]` rather than RULE
-   * 1's editing context — because "break *this* path" is about this path's
-   * outline: which of its arcs lie between crossings. A node that is not a Path
-   * (or a selection that is not one object) has no spans, and the panel then
-   * offers no break.
+   * The crossings that split a path are crossings *with other artwork*, so the
+   * question is asked of the selected path **together with the rest of its
+   * layer** — RULE 1's participants, named explicitly rather than through the
+   * editing context, because the selection is a single object here and the
+   * partners must not be left out of the graph. (A layer-mate that is a group
+   * is expanded by the engine, so a path inside a group sees across it.)
    *
-   * Recomputed when the snapshot changes: moving a shape across another changes
-   * where the crossings are, so the spans are geometry, not selection.
+   * A node that is not a Path (or a selection that is not one object) has no
+   * spans, and the panel then offers no break. Recomputed when the snapshot
+   * changes: moving a shape across another changes where the crossings are, so
+   * the spans are geometry, not selection.
    */
   const selectedSpans = useMemo<SpanRow[]>(() => {
     if (!client || selection.length !== 1) return [];
     const node = selectedNode(snapshot, selection);
     if (!node || node.primitive.type !== 'path') return [];
-    const plan = client.smartFillPlan([node.id], null);
+    const peers = Object.values(snapshot?.scene.nodes ?? {})
+      .filter((other) => other.layer === node.layer && other.id !== node.id)
+      .map((other) => other.id);
+    const plan = client.smartFillPlan([node.id, ...peers], null);
     return spanRows(plan, node.id);
   }, [client, selection, snapshot]);
 

@@ -22,7 +22,7 @@
 use proptest::prelude::*;
 use vectra_core::{
     new_node_id, new_operation_id, Command, Engine, EngineEvent, NodeId, NodeKind, OperationId,
-    Parameter, ParamValue, PathSegment, Point2,
+    ParamValue, Parameter, PathSegment, Point2,
 };
 use vectra_geometry::{
     path_area, path_to_svg_data, primitive_to_path, EvaluatedPrimitive, EvaluatedScene,
@@ -187,7 +187,16 @@ fn law_a_smart_fill_is_the_region_its_seed_is_in() {
     // The region graph agrees, from the same scene and a different code path.
     let graph = h.graph(&[a, b]);
     assert_eq!(graph.faces.len(), 3, "A only, B only and the lens");
-    assert_eq!(graph.face_at((60.0, 0.0)), Some(graph.faces.iter().position(|f| f.members == [true, true]).unwrap()));
+    assert_eq!(
+        graph.face_at((60.0, 0.0)),
+        Some(
+            graph
+                .faces
+                .iter()
+                .position(|f| f.members == [true, true])
+                .unwrap()
+        )
+    );
 
     // **RULE 4's paint**: the drop's colour is the fill's own appearance stack,
     // and the boundaries are untouched by it.
@@ -200,7 +209,9 @@ fn law_a_smart_fill_is_the_region_its_seed_is_in() {
     let boundary_style = &h.scene.get(a).unwrap().style;
     assert_ne!(
         style.first_fill().map(|layer| format!("{:?}", layer.paint)),
-        boundary_style.first_fill().map(|layer| format!("{:?}", layer.paint)),
+        boundary_style
+            .first_fill()
+            .map(|layer| format!("{:?}", layer.paint)),
         "the fill did not repaint its boundary"
     );
 }
@@ -312,8 +323,14 @@ fn law_break_path_is_non_destructive_and_one_undo() {
     );
     // 4. One undo, exactly as it was.
     h.undo();
-    assert!(h.engine.document().get_node(square).unwrap().visible, "shown again");
-    assert!(h.engine.document().nodes.get(&first).is_none(), "pieces gone");
+    assert!(
+        h.engine.document().get_node(square).unwrap().visible,
+        "shown again"
+    );
+    assert!(
+        !h.engine.document().nodes.contains_key(&first),
+        "pieces gone"
+    );
     assert_eq!(h.drawn(square).expect("drawn"), before, "byte for byte");
 }
 
@@ -390,7 +407,11 @@ proptest! {
     #[test]
     fn prop_moving_a_boundary_updates_the_fill_geometry(
         r in 60.0f64..100.0,
-        shift in 5.0f64..40.0,
+        // The circles part by at most `0.45r`, so the seed — the midpoint of
+        // their centres — is still inside *both* and the fill is still a lens.
+        // Pulling them further apart is the other law's territory: there the
+        // fill follows the seed into `a` alone.
+        shift_frac in 0.05f64..0.45,
     ) {
         let mut h = Harness::new();
         let a = h.circle(0.0, 0.0, r, "a");
@@ -407,17 +428,21 @@ proptest! {
 
         // Move B: the write names the boundary, and the operations layer names
         // the fill as a dependent — this is the dirtiness RULE 2 asks for.
-        let moved = r + shift;
+        let moved = r * (1.0 + shift_frac);
         let events = h.move_param(b, "cx", moved);
-        let dirty: Vec<NodeId> = events
+        // The core publishes *what changed* (`NodesUpdated`); the `Dirty` the
+        // UI sees is the shell's own wrapper (`vectra_wasm::dirty_event`),
+        // built from this set plus the dependents below — so asserting on the
+        // pair is asserting on exactly the ids that drive `run_operations`.
+        let changed: Vec<NodeId> = events
             .iter()
             .flat_map(|event| match event {
-                EngineEvent::Dirty { ids } => ids.clone(),
+                EngineEvent::NodesUpdated { ids } => ids.clone(),
                 _ => Vec::new(),
             })
             .collect();
-        prop_assert!(dirty.contains(&b), "the boundary is dirty");
-        let affected = h.engine.document().operations.affected_by(&dirty);
+        prop_assert!(changed.contains(&b), "the boundary is named: {changed:?}");
+        let affected = h.engine.document().operations.affected_by(&changed);
         prop_assert!(affected.contains(&fill), "the fill depends on its boundary");
 
         // …and the geometry is the *new* region.
@@ -432,10 +457,14 @@ proptest! {
         prop_assert!(after_area < before_area, "two circles further apart make a smaller lens");
     }
 
-    /// **The Parametric Update Law, the honest failure.** Pull the boundaries
-    /// apart until the seed is in no face: the fill is **empty and says so** —
-    /// it does not silently adopt the nearest region, keep the old geometry, or
-    /// take the document down with it.
+    /// **The Parametric Update Law, the honest failure.** A fill is pinned to
+    /// the *seed*: it paints the face the seed is in, whatever that face is now
+    /// — moving one boundary away leaves the seed inside `a`, and the fill is
+    /// `a`'s face rather than the vanished lens or a stale copy of it.
+    ///
+    /// And when *both* boundaries leave the seed in no face at all, the fill is
+    /// **empty and says so**: it does not adopt the nearest region, keep the old
+    /// geometry, or take the document down with it.
     #[test]
     fn prop_a_fill_whose_seed_leaves_every_face_reports_smart_fill_empty(
         r in 60.0f64..100.0,
@@ -445,8 +474,21 @@ proptest! {
         let a = h.circle(0.0, 0.0, r, "a");
         let b = h.circle(r, 0.0, r, "b");
         let fill = h.smart_fill(vec![a, b], (r / 2.0, 0.0));
-        h.move_param(b, "cx", r * (1.0 + separation));
+        let lens = h.drawn(fill).expect("the lens draws");
 
+        // The lens is gone, the seed is not: the circles are apart, the seed is
+        // inside `a` alone, so the fill is `a`'s face — re-derived, not replayed.
+        h.move_param(b, "cx", r * (1.0 + separation));
+        let widened = h.drawn(fill).expect("the seed is still inside a");
+        prop_assert_ne!(&widened, &lens, "the fill followed its seed");
+        let (fill_area, a_area) = (h.area(fill), h.area(a));
+        prop_assert!(
+            (fill_area - a_area).abs() / a_area < 1e-6,
+            "and that face is `a`: {fill_area} vs {a_area}"
+        );
+
+        // Take both boundaries off the seed: no face encloses it any more.
+        h.move_param(a, "cx", -3.0 * r);
         prop_assert!(h.drawn(fill).is_none(), "no region, no geometry");
         prop_assert!(
             h.diagnostics
@@ -499,11 +541,20 @@ proptest! {
             vectra_geometry::ring_pieces_between(&ring[span.ring], span.from, span.to);
         prop_assert!(piece_a.len() >= 2 && piece_b.len() >= 2);
 
-        // Both pieces start and end at the crossings — no gap between them.
-        let head = piece_a[0];
-        prop_assert!((head.0 - span.start.0).abs() < 1e-6 && (head.1 - span.start.1).abs() < 1e-6);
-        let tail = *piece_b.last().unwrap();
-        prop_assert!((tail.0 - span.end.0).abs() < 1e-6 && (tail.1 - span.end.1).abs() < 1e-6);
+        // Both pieces start and end at the crossings — no gap between them: the
+        // span runs cut→cut, the complementary arc runs cut→cut the other way,
+        // so each piece's head is the other's tail.
+        let near = |a: (f64, f64), b: (f64, f64)| {
+            (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+        };
+        let head_a = piece_a[0];
+        let tail_a = *piece_a.last().unwrap();
+        let head_b = piece_b[0];
+        let tail_b = *piece_b.last().unwrap();
+        prop_assert!(near(head_a, span.start), "the span starts at the first cut");
+        prop_assert!(near(tail_a, span.end), "and ends at the second");
+        prop_assert!(near(head_b, span.end), "the other arc starts where it ended");
+        prop_assert!(near(tail_b, span.start), "and closes the ring at the first cut");
 
         // Their areas add up to the square's, and the pieces *tile* it: a
         // shoelace over the arcs, against the path area of the source.

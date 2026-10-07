@@ -549,6 +549,49 @@ export class VectraEngine {
         }
     }
     /**
+     * **Break a path at the intersections of its outline** (Task 12.0 RULE 3).
+     *
+     * `spans_json` is `[[from, to], …]` — arc lengths along the node's outline,
+     * exactly the numbers [`Self::smart_fill_plan`] reported, so the UI echoes
+     * what the engine measured instead of computing a cut of its own.
+     *
+     * **The spans are read as cut positions, and that is the whole algorithm.**
+     * A span's two ends *are* two crossings; collect the ends of every span the
+     * caller named, walk the ring between consecutive cuts, and each arc
+     * between them is one piece. Nothing about the count of pieces is special-
+     * cased, and both gestures fall out of the same rule:
+     *
+     * * one span → two cuts → **two** complementary arcs (the span, and the rest
+     *   of the ring) — "break this span";
+     * * every span of a path crossed twice → two distinct cuts → **two** arcs
+     *   that tile the ring — "Break Path at Intersections".
+     *
+     * A ring nothing crosses is not broken: it is carried over as a piece of its
+     * own, so every point of the outline ends up in exactly one piece. The
+     * pieces become ordinary closed `Path` nodes wearing the source's paint, and
+     * the source is hidden rather than deleted — one undo away, and the region
+     * graph that suggested the cut is still there to re-read.
+     * @param {string} node_id
+     * @param {string} spans_json
+     * @returns {string}
+     */
+    break_path(node_id, spans_json) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(node_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(spans_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_break_path(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * The Smart Component inspector's whole world: what the selection is, and
      * every prop it exposes (Task 10.6 RULE 1, RULE 4).
      * @returns {string}
@@ -1605,6 +1648,48 @@ export class VectraEngine {
         }
     }
     /**
+     * **The Smart Fill plan** (Task 12.0 RULE 1): the region graph of a set of
+     * paths, as JSON — see [`RegionPlanWire`].
+     *
+     * This is a *query*, not a command: it mutates nothing, and every consumer
+     * that needs to know which faces a set of paths makes asks here rather than
+     * computing a region of its own.
+     *
+     * `ids_json` names the boundaries. **An empty list means RULE 1's own
+     * sentence** — *"all selected or overlapping paths in the active layer"* —
+     * so the callers that have no opinion (the tool, the drop) pass `[]` and get
+     * the rule, while a panel or a test can still name a set. Either way a
+     * **group expands** to the shapes it holds: a group is a selection, not a
+     * boundary, and point-in-region against a group has no meaning of its own.
+     * An id with no evaluated geometry contributes no face.
+     *
+     * `point_json` is `null` — or the two numbers of a **drop point** (RULE 4's
+     * seed). With a point, `hit` is the face that contains it, or `null` when it
+     * falls in no face at all; the test is `RegionGraph::face_at`, which is the
+     * same smallest-face-wins answer a fill's own evaluation uses, so the
+     * highlight the designer sees and the region the fill adopts are one
+     * function, not two that agree today.
+     * @param {string} ids_json
+     * @param {string} point_json
+     * @returns {string}
+     */
+    smart_fill_plan(ids_json, point_json) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(ids_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(point_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_smart_fill_plan(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * The structural macros the command bar offers as one-tap chips (RULE 2):
      * the prompt text, plus what it will do, in the designer's words.
      * @returns {string}
@@ -2472,17 +2557,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 574, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 577, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 599, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 602, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue__core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_e751eaa9cf7806ea___JsError___true_);
             return ret;
         },
         __wbindgen_generic_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 575, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 578, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wgpu_cf189251abdffb5b___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_);
             return ret;
         },

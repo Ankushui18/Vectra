@@ -1950,6 +1950,7 @@ dependencies = [
 name = "vectra-geometry"
 version = "0.1.0"
 dependencies = [
+ "geo",
  "lyon",
  "proptest",
  "rustybuzz",

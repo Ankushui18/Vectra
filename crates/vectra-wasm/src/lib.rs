@@ -58,7 +58,7 @@ use vectra_core::summary::DocumentSummary;
 use vectra_core::{
     parse_node_id, Command, ConstraintTarget, Engine, EngineEvent, EvalMode, GeometryData,
     MotionBinding, MotionTrack, NodeId, NodeKind, NodeOutputId, OperationId, ParamValue, Parameter,
-    ProceduralKind, Resolvable, VectraError,
+    Point2, ProceduralKind, Resolvable, VectraError,
 };
 use vectra_dependency::{gate_command, DependencyGraph, GraphExport, IncrementalScene};
 use vectra_geometry::EvaluatedPrimitive;
@@ -1329,17 +1329,13 @@ impl VectraEngine {
     pub fn smart_fill_plan(&mut self, ids_json: &str, point_json: &str) -> String {
         let requested: Vec<String> = match serde_json::from_str(ids_json) {
             Ok(ids) => ids,
-            Err(error) => {
-                return CommandResponse::err_json(format!("invalid id list: {error}"))
-            }
+            Err(error) => return CommandResponse::err_json(format!("invalid id list: {error}")),
         };
         let point: Option<(f64, f64)> = match point_json.trim() {
             "" | "null" | "undefined" => None,
             text => match serde_json::from_str::<[f64; 2]>(text) {
                 Ok([x, y]) => Some((x, y)),
-                Err(error) => {
-                    return CommandResponse::err_json(format!("invalid point: {error}"))
-                }
+                Err(error) => return CommandResponse::err_json(format!("invalid point: {error}")),
             },
         };
         // An empty request is RULE 1's default: what the designer is working on.
@@ -1358,13 +1354,17 @@ impl VectraEngine {
             let Some(id) = vectra_core::parse_node_id(text) else {
                 continue;
             };
-            let members: Vec<NodeId> = if Self::is_group(&self.core.document(), id) {
+            // A group stands for its contents — it has no outline of its own —
+            // and anything else is the shape it names. (Naming a plain shape
+            // therefore contributes that shape; only a nested *group* expands
+            // on its own member's pass.)
+            let named: Vec<NodeId> = if Self::is_group(self.core.document(), id) {
                 self.core.document().node_block(id)
             } else {
                 vec![id]
             };
-            for member in members {
-                if member == id || Self::is_group(&self.core.document(), member) {
+            for member in named {
+                if Self::is_group(self.core.document(), member) {
                     continue;
                 }
                 if !ids.contains(&member) {
@@ -1470,9 +1470,7 @@ impl VectraEngine {
         };
         let spans: Vec<(f64, f64)> = match serde_json::from_str(spans_json) {
             Ok(spans) => spans,
-            Err(error) => {
-                return CommandResponse::err_json(format!("invalid span list: {error}"))
-            }
+            Err(error) => return CommandResponse::err_json(format!("invalid span list: {error}")),
         };
         if spans.is_empty() {
             return CommandResponse::err_json(
@@ -3137,9 +3135,9 @@ impl VectraEngine {
             .extend(evaluation.diagnostics.iter().cloned());
         let recomputed = evaluation.recomputed.clone();
         evaluation.compose_into(self.scene.scene_mut(), self.core.document());
-        // `compose_into` already dropped anything no longer live, so the
-        // pruning pass is a no-op here; it stays as the single place that
-        // enforces the live-id invariant.
+        // `compose_into` dropped what is no longer live *and* retired the
+        // operations that failed this pass, so a prune here would be a no-op;
+        // the live-id invariant is enforced in the one place both passes share.
         recomputed
     }
 

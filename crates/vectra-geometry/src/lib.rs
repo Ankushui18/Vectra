@@ -31,31 +31,31 @@ pub mod scene;
 pub mod text;
 
 pub use angles::{normalize_arc_angles, TAU};
-/// The `geo` coordinate type, re-exported so a boundary (the wasm layer) can
-/// name the rings the region graph hands it without depending on `geo` itself.
-pub use geo::Coord as GeoCoord;
+pub use convert::{
+    arc_samples, multi_polygon_to_path, path_area, path_to_multi_polygon, region_area,
+    FLATTEN_TOLERANCE,
+};
 pub use diagnostic::{Diagnostic, DiagnosticCode, Severity};
 pub use evaluator::{
     is_renderable, is_renderable_point, DirtySet, Evaluator, GeometryEvaluator, SceneEvaluation,
     MAX_RENDERABLE,
 };
+/// The `geo` coordinate type, re-exported so a boundary (the wasm layer) can
+/// name the rings the region graph hands it without depending on `geo` itself.
+pub use geo::Coord as GeoCoord;
 pub use paint::{
     resolve_appearance, resolve_style, EvaluatedAppearance, EvaluatedAppearanceKind,
     EvaluatedGradient, EvaluatedPaint,
-};
-pub use convert::{
-    arc_samples, multi_polygon_to_path, path_area, path_to_multi_polygon, region_area,
-    FLATTEN_TOLERANCE,
-};
-pub use regions::{
-    atoms, crossings, face_containing, path_rings, point_on_rings, ring_crossings,
-    ring_pieces_between, ring_point_at, ring_polygon, source_bounds, source_rings, sources_of,
-    spans_of, Crossing, RegionFace, RegionGraph, SourceSpec, Span, REGION_EPSILON,
 };
 pub use paths::{
     build_path, path_bounds, path_to_rings, path_to_svg_data, polyline_to_path,
     primitive_to_curve_path, primitive_to_path, primitive_to_rings, rings_to_path, ResolvedSegment,
     ARC_SEGMENTS_PER_TAU,
+};
+pub use regions::{
+    atoms, crossings, face_containing, path_rings, point_on_rings, ring_crossings,
+    ring_pieces_between, ring_point_at, ring_polygon, source_bounds, source_rings, sources_of,
+    spans_of, Crossing, RegionFace, RegionGraph, RingArc, SourceSpec, Span, REGION_EPSILON,
 };
 pub use scene::{
     EvaluatedGlyph, EvaluatedNode, EvaluatedPrimitive, EvaluatedScene, EvaluatedStyle,

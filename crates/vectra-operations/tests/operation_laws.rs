@@ -86,10 +86,13 @@ impl Harness {
     fn apply(&mut self, kind: OperationKind, inputs: Vec<NodeId>) -> OperationId {
         let id = new_operation_id();
         self.engine
-            .dispatch(Command::ApplyOperation { id, kind, inputs,
-            style: None,
-            name: None,
-        })
+            .dispatch(Command::ApplyOperation {
+                id,
+                kind,
+                inputs,
+                style: None,
+                name: None,
+            })
             .expect("apply operation");
         self.refresh();
         id
@@ -550,9 +553,9 @@ fn arity_and_missing_inputs_are_rejected_before_anything_is_stored() {
                     op: BooleanOp::Union,
                 },
                 inputs,
-            style: None,
-            name: None,
-        })
+                style: None,
+                name: None,
+            })
             .expect_err("arity violation");
         assert!(error.is_operation_error(), "{error}");
     }

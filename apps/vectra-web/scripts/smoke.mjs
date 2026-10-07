@@ -3929,10 +3929,16 @@ const runPayload = (text, fontSize) => ({
   assert.ok(lens.path.includes('M') && lens.path.includes('Z'), 'a region is a clean closed path');
 
   // The crossing points themselves: two circles crossing at x = 260, y = 200 ± 80.
+  // A crossing is where the two *outlines the renderer draws* meet, and those
+  // outlines are flattened polygons whose chords cut the corner by up to the
+  // flattening tolerance — so the honest check is that each crossing lies on
+  // both circles, near the analytic point, not that it lands on it exactly.
   assert.equal(plan.crossings.length, 2, JSON.stringify(plan.crossings));
   for (const [x, y] of plan.crossings) {
-    assert.ok(Math.abs(x - 260) < 1e-6, `crossing on the midline: ${x}`);
-    assert.ok(Math.abs(Math.abs(y - 200) - 80) < 1e-6, `crossing at ±80: ${y}`);
+    assert.ok(Math.abs(Math.hypot(x - 200, y - 200) - 100) < 0.25, `crossing lies on A: ${x},${y}`);
+    assert.ok(Math.abs(Math.hypot(x - 320, y - 200) - 100) < 0.25, `crossing lies on B: ${x},${y}`);
+    assert.ok(Math.abs(x - 260) < 0.5, `crossing on the midline: ${x}`);
+    assert.ok(Math.abs(Math.abs(y - 200) - 80) < 0.5, `crossing at ±80: ${y}`);
   }
   // Each outline is cut into the arcs between those crossings, and the arcs are
   // the whole outline — the spans partition it.
@@ -4029,8 +4035,25 @@ const runPayload = (text, fontSize) => ({
   const lensNow = planNow.regions.find((region) => region.members.length === 2);
   assert.ok(lensNow && lensNow.area < 8946, `narrower lens after the move: ${lensNow.area}`);
 
-  // Pull them apart: the seed is in no face, so the fill is *empty and says so*.
+  // Pull them far apart: the *lens* is gone, but the seed is still inside A, and
+  // the fill keeps to its seed — it is A's face now, re-derived again, rather
+  // than a stale copy of the old lens.
   send({ type: 'SetParameter', node_id: b, property: 'cx', value: { Float: { Literal: 900 } } });
+  scene = snap();
+  const followed = scene.scene.nodes[fill];
+  assert.ok(followed, 'the seed is still enclosed — the fill follows the seed');
+  assert.notEqual(followed.primitive.d, afterMove, 'and it is not the old lens');
+  const planApart = JSON.parse(
+    fengine.smart_fill_plan(JSON.stringify([a, b]), JSON.stringify([260, 200])),
+  );
+  assert.equal(
+    planApart.regions[planApart.hit].members.join(),
+    a,
+    'the seed resolves to A alone in the new arrangement',
+  );
+  // Now take *both* boundaries off the seed: no face encloses it any more, and
+  // the fill is *empty and says so*.
+  send({ type: 'SetParameter', node_id: a, property: 'cx', value: { Float: { Literal: -1000 } } });
   scene = snap();
   assert.equal(scene.scene.nodes[fill], undefined, 'with no region, there is no fill');
   const note = scene.diagnostics.find((d) => d.code === 'smart-fill-empty');
@@ -4073,6 +4096,7 @@ const runPayload = (text, fontSize) => ({
         y: { Literal: 50 },
         width: { Literal: 200 },
         height: { Literal: 100 },
+        corner_radius: { Literal: 0 },
       },
     },
   });
@@ -4080,7 +4104,9 @@ const runPayload = (text, fontSize) => ({
   const before = snap();
   const drawn = before.scene.nodes[square].primitive.d;
   const beforeIds = new Set(Object.keys(before.scene.nodes));
-  const plan = JSON.parse(pengine.smart_fill_plan(JSON.stringify([square]), null));
+  // The bar is a *participant*: a path's spans are its arcs between crossings
+  // with the other paths in the graph, so both are named.
+  const plan = JSON.parse(pengine.smart_fill_plan(JSON.stringify([square, bar]), 'null'));
   const source = plan.sources.find((s) => s.id === square);
   assert.ok(source, 'the square is a boundary');
   assert.equal(source.spans.length, 2, 'the bar crosses it twice, so it has two spans');
@@ -4103,7 +4129,7 @@ const runPayload = (text, fontSize) => ({
     assert.equal(piece.style.fill, before.scene.nodes[square].style.fill, 'wearing the source paint');
   }
   // **No gaps and no overlap**: the pieces' areas add back up to the source's.
-  const piecesPlan = JSON.parse(pengine.smart_fill_plan(JSON.stringify(fresh), null));
+  const piecesPlan = JSON.parse(pengine.smart_fill_plan(JSON.stringify(fresh), 'null'));
   const total = piecesPlan.sources.reduce((sum, s) => sum + s.area, 0);
   assert.ok(
     Math.abs(total - source.area) < 1e-6,
@@ -4151,30 +4177,52 @@ const runPayload = (text, fontSize) => ({
         y: { Literal: 50 },
         width: { Literal: 200 },
         height: { Literal: 100 },
+        corner_radius: { Literal: 0 },
       },
     },
   });
 
-  const plan = JSON.parse(sengine.smart_fill_plan(JSON.stringify([square]), null));
+  const plan = JSON.parse(sengine.smart_fill_plan(JSON.stringify([square, bar]), 'null'));
   const span = plan.sources.find((s) => s.id === square).spans[0];
   const reply = JSON.parse(sengine.break_path(square, JSON.stringify([[span.from, span.to]])));
   assert.equal(reply.status, 'ok', JSON.stringify(reply));
   const split = snap();
   const fresh = Object.keys(split.scene.nodes).filter((id) => id !== square && id !== bar);
   assert.equal(fresh.length, 2, 'a span splits the path into the span and the rest');
-  const areas = JSON.parse(sengine.smart_fill_plan(JSON.stringify(fresh), null)).sources.map(
+  const areas = JSON.parse(sengine.smart_fill_plan(JSON.stringify(fresh), 'null')).sources.map(
     (s) => s.area,
   );
   assert.ok(
-    Math.abs(areas[0] - span.length * 200 / (200 * 4) * 40000) < 1e-6 ||
-      Math.abs(areas.reduce((x, y) => x + y, 0) - 40000) < 1e-6,
+    Math.abs(areas.reduce((x, y) => x + y, 0) - 40000) < 1e-6,
     `the two arcs are the whole square: ${JSON.stringify(areas)}`,
   );
 
-  // Nothing crosses the bar: no spans, and a break at nothing is refused.
-  const barPlan = JSON.parse(sengine.smart_fill_plan(JSON.stringify([bar]), null));
-  assert.equal(barPlan.sources[0].spans.length, 0, 'the bar has no crossings at all');
-  const refused = JSON.parse(sengine.break_path(bar, '[]'));
+  // **A path nothing crosses has no span at all** — the two cuts are the only
+  // reason to cut. The lone circle shares a graph with the crossed square, so
+  // the zero is about the circle and not about an empty question.
+  const lone = crypto.randomUUID();
+  send({
+    type: 'CreateNode',
+    id: lone,
+    name: 'lone',
+    kind: {
+      Circle: {
+        cx: { Literal: 600 },
+        cy: { Literal: 600 },
+        radius: { Literal: 50 },
+      },
+    },
+  });
+  const whole = JSON.parse(
+    sengine.smart_fill_plan(JSON.stringify([square, bar, lone]), 'null'),
+  );
+  const spansOf = (id) => whole.sources.find((s) => s.id === id)?.spans.length ?? -1;
+  assert.equal(spansOf(lone), 0, 'nothing crosses the lone circle');
+  assert.equal(spansOf(square), 2, 'and in the same graph the square keeps its two');
+
+  // A break at no spans is refused: "nothing to break" is an answer, not an
+  // invented cut.
+  const refused = JSON.parse(sengine.break_path(lone, '[]'));
   assert.equal(refused.status, 'error', JSON.stringify(refused));
   console.log('smoke[79/79]: RULE 3 — one span, two arcs; nothing to break is refused');
 }

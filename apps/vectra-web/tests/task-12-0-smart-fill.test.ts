@@ -25,7 +25,6 @@ import {
   breakStatus,
   placeRegion,
   regionAt,
-  regionDrop,
   regionShape,
   regionStatus,
   sourceRows,
@@ -110,9 +109,11 @@ test('empty space highlights nothing at all', () => {
 
 test('the status line names the region, its boundaries and its holes', () => {
   assert.equal(regionStatus(PLAN), '◲ Smart Fill · region 1 of 3 · 2 boundaries');
+  // The engine numbers a face by its place in the list, so a one-face plan
+  // carries `index: 0` — the fixture says so too.
   const holed: RegionPlanWire = {
     ...PLAN,
-    regions: [{ ...PLAN.regions[1], holes: 1 }],
+    regions: [{ ...PLAN.regions[1], index: 0, holes: 1 }],
     hit: 0,
   };
   assert.equal(regionStatus(holed), '◲ Smart Fill · region 1 of 1 · 1 boundary · 1 hole');

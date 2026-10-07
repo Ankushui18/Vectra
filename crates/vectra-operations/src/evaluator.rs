@@ -55,10 +55,30 @@ impl OperationEvaluation {
         self.nodes.is_empty() && self.diagnostics.is_empty()
     }
 
+    /// The ids this pass recomputed and could **not** compute — one diagnostic
+    /// each, and no geometry.
+    ///
+    /// They matter to the scene: such an id is still live (the registry row is
+    /// there, the operation is enabled), so pruning by liveness alone would
+    /// leave the last shape the operation managed on the canvas and make the
+    /// failure invisible. This is the operations half of what
+    /// `vectra_procedural::ProceduralEvaluation::retired` does for the
+    /// procedural half.
+    pub fn retired(&self) -> Vec<OperationId> {
+        self.recomputed
+            .iter()
+            .copied()
+            .filter(|id| !self.nodes.contains_key(id))
+            .collect()
+    }
+
     /// Fold this pass into the scene: replace the recomputed virtual nodes,
-    /// drop what is no longer live geometry, and restack z-order.
+    /// drop what is no longer live geometry, restack z-order — and **retire the
+    /// ones that failed**, so a Smart Fill whose seed left every face stops
+    /// drawing instead of showing the region it used to be.
     pub fn compose_into(&self, scene: &mut EvaluatedScene, doc: &Document) {
         scene.apply_operations(doc, self.nodes.values().cloned());
+        scene.retire(&self.retired());
     }
 }
 
@@ -225,10 +245,12 @@ fn evaluate_smart_fill(
 ) -> Result<EvaluatedNode, OperationError> {
     let mut sources: Vec<SourceSpec> = Vec::with_capacity(boundaries.len());
     for boundary in boundaries {
-        let node = primitives.get(*boundary).ok_or(OperationError::MissingInput {
-            operation: op.id,
-            input: *boundary,
-        })?;
+        let node = primitives
+            .get(*boundary)
+            .ok_or(OperationError::MissingInput {
+                operation: op.id,
+                input: *boundary,
+            })?;
         // A boundary that covers no area (an open arc, a hidden shape the
         // evaluator skipped) is not an error on its own: it simply forms no
         // face. Only *nothing at all* to intersect is.

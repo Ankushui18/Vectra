@@ -7,7 +7,10 @@
 use thiserror::Error;
 use vectra_core::{NodeId, OperationId};
 
-#[derive(Debug, Error, PartialEq, Eq)]
+// `Eq` is deliberately absent: `SmartFillEmpty` carries the seed point a region
+// failed to surround, and `f64` is `PartialEq` but not `Eq` — stating equality
+// as partial is the honest description of an error that reports coordinates.
+#[derive(Debug, Error, PartialEq)]
 pub enum OperationError {
     /// The operation id is not in the registry (removed between the pass being
     /// scheduled and running).
