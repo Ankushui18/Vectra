@@ -108,14 +108,63 @@ pub enum OperationKind {
     Fillet { radius: Parameter<f64> },
     /// Reflect the input across an axis.
     Mirror { axis: MirrorAxis },
+    /// **A parametric region between boundary paths** (Task 12.0 RULE 2).
+    ///
+    /// A Smart Fill is not a colour on a shape: it is a *place* — the face of
+    /// the planar arrangement the boundaries form — that a designer paints.
+    /// Move a boundary and the region it painted follows, because the fill
+    /// stores the boundaries and a **seed point**, not a copy of the geometry.
+    ///
+    /// # Why a seed point and not "face 2"
+    ///
+    /// A face index is a position in a list, and a list is renumbered by
+    /// anything: adding a boundary, moving one, a `Subtract` that splits an
+    /// overlap in two. The seed is the point the designer dropped (RULE 4), and
+    /// it keeps meaning the same thing under all of those: *the face under this
+    /// point*. If the boundaries move so far apart that the seed is in no face
+    /// at all, the fill is empty and says so (`smart-fill-empty`) instead of
+    /// silently becoming a different region.
+    ///
+    /// # `inputs`
+    ///
+    /// `inputs[0]` is the operation's own id — the conventional "seed slot" of
+    /// a region operation, and the reason the evaluator can treat `inputs[0]`
+    /// as the seed *carrier* while `inputs[1..]` are the boundaries it reads.
+    /// The node records it this way so `affected_by` (which propagates dirt
+    /// through `inputs`) sees the boundaries without a second code path.
+    SmartFill {
+        /// The point whose face the fill paints, in document units.
+        seed: (f64, f64),
+        /// The paths whose arrangement defines the faces, in the order the
+        /// signatures are stated in. Never empty.
+        boundaries: Vec<NodeId>,
+    },
 }
 
 impl OperationKind {
     /// Number of inputs this kind consumes.
+    ///
+    /// A `SmartFill` is **variadic**: a region is bounded by however many paths
+    /// the designer selected, so `inputs` is `[the fill itself] + boundaries`
+    /// and the count is `boundaries.len() + 1` (see the variant's note). Every
+    /// other kind is fixed.
     pub fn arity(&self) -> usize {
         match self {
             Self::Boolean { .. } => 2,
             Self::Offset { .. } | Self::Fillet { .. } | Self::Mirror { .. } => 1,
+            Self::SmartFill { boundaries, .. } => boundaries.len() + 1,
+        }
+    }
+
+    /// The boundary paths a `SmartFill` reads, or `&[]` for every other kind.
+    ///
+    /// The one reader of "which slots of this kind are *shapes*" — the
+    /// evaluator, the panel and the AI summary all ask here rather than
+    /// re-deriving it from `inputs`.
+    pub fn boundaries(&self) -> &[NodeId] {
+        match self {
+            Self::SmartFill { boundaries, .. } => boundaries,
+            _ => &[],
         }
     }
 
@@ -130,6 +179,9 @@ impl OperationKind {
             Self::Offset { distance } => visit(distance),
             Self::Fillet { radius } => visit(radius),
             Self::Mirror { axis } => axis.for_each_float_param(visit),
+            // A smart fill's numbers are its seed *point*, which is a literal
+            // pair — the region it paints is geometry, not a scalar operand.
+            Self::SmartFill { .. } => {}
         }
     }
 
@@ -139,6 +191,7 @@ impl OperationKind {
             Self::Offset { .. } => "offset",
             Self::Fillet { .. } => "fillet",
             Self::Mirror { .. } => "mirror",
+            Self::SmartFill { .. } => "smart-fill",
         }
     }
 
@@ -165,6 +218,14 @@ impl OperationKind {
                     other => format!("mirror across y ({})", other.source_tag()),
                 },
             },
+            Self::SmartFill { boundaries, .. } => {
+                let count = boundaries.len();
+                if count == 1 {
+                    "smart fill · 1 boundary".to_string()
+                } else {
+                    format!("smart fill · {count} boundaries")
+                }
+            }
         }
     }
 }
@@ -210,6 +271,18 @@ impl OperationNode {
         }
     }
 
+    /// A smart fill: `inputs` is `[the fill itself] + boundaries`, and the
+    /// seed rides in the kind (see [`OperationKind::SmartFill`]).
+    ///
+    /// The name defaults to the *place*, not the kind — a designer with four
+    /// fills in one arrangement wants to tell them apart in the layers panel.
+    pub fn smart_fill(id: OperationId, boundaries: Vec<NodeId>, seed: (f64, f64)) -> Self {
+        let mut inputs = vec![id];
+        inputs.extend(boundaries.iter().copied());
+        let kind = OperationKind::SmartFill { seed, boundaries };
+        Self::new(id, kind, inputs)
+    }
+
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
@@ -235,6 +308,28 @@ impl OperationNode {
             if inputs[..index].contains(input) {
                 return Err(VectraError::command(format!(
                     "operation {id} lists input {input} twice: an operand cannot be its own clip"
+                )));
+            }
+        }
+        if let OperationKind::SmartFill { boundaries, seed } = kind {
+            // The shape of a region record: at least one boundary, no
+            // duplicates, a finite seed, and `inputs[0]` the fill itself —
+            // `inputs[1..]` *are* the boundaries, in order, so the two can
+            // never drift.
+            if boundaries.is_empty() {
+                return Err(VectraError::command(format!(
+                    "smart fill {id} has no boundaries: a region needs at least one path around it"
+                )));
+            }
+            if !seed.0.is_finite() || !seed.1.is_finite() {
+                return Err(VectraError::command(format!(
+                    "smart fill {id} has a non-finite seed ({}, {})",
+                    seed.0, seed.1
+                )));
+            }
+            if inputs.first() != Some(&id) || inputs[1..] != boundaries[..] {
+                return Err(VectraError::command(format!(
+                    "smart fill {id} must list itself first and then its boundaries"
                 )));
             }
         }

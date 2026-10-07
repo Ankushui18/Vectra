@@ -15,7 +15,7 @@
  */
 
 /** The tools a user can hold. `select` is Task 3.2's drag tool. */
-export type ToolId = 'select' | 'direct' | 'pen' | 'brush';
+export type ToolId = 'select' | 'direct' | 'pen' | 'brush' | 'text' | 'smartFill';
 
 export interface ToolSpec {
   id: ToolId;
@@ -63,6 +63,33 @@ export const TOOLS: ToolSpec[] = [
     blurb: 'Draw freehand. Hold still on a rough closed shape and it snaps to a circle or a rectangle.',
     cursor: 'crosshair',
     direct: true,
+  },
+  {
+    id: 'text',
+    label: 'Text',
+    shortcut: 'T',
+    blurb: 'Click to place a text cursor, type, and set the type in the Text panel. Outline it to edit the letterforms.',
+    cursor: 'text',
+    // Neither: a text click places a node through an *ordinary command* and
+    // then hands the work to the Text panel — which is a parametric surface, so
+    // hiding it would hide the thing the tool exists to show. RULE 4 names
+    // drawing, and typing is not drawing.
+    direct: false,
+  },
+  {
+    id: 'smartFill',
+    label: 'Smart Fill',
+    // Illustrator gives Smart Fill no default letter (it is a Shift-K there);
+    // *F* is free here and reads as "fill" — the only rule a shortcut has to
+    // obey is that the letter is not already taken, and the check is a test.
+    shortcut: 'F',
+    blurb:
+      'Hover an enclosed area — every face the paths make is a region. Click to fill it: the fill is a node that follows the paths around it.',
+    cursor: 'crosshair',
+    // A *parametric* tool, like Select: what it makes is a node with an
+    // appearance stack the designer then edits, so RULE 4's gate keeps the
+    // panels — including the Operations panel the new fill appears in.
+    direct: false,
   },
 ];
 
@@ -130,6 +157,10 @@ export function designerHint(tool: ToolId): string {
       return 'Brush — draw freehand; hold still on a rough circle or box to snap it to the primitive.';
     case 'direct':
       return 'Direct Selection — click a path, click an anchor to own it, hover to reveal its handles, drag a handle to shape the curve.';
+    case 'text':
+      return 'Text — click to place type, type the words, set family/size/spacing in the Text panel, then Outline to edit the letterforms.';
+    case 'smartFill':
+      return 'Smart Fill — hover an enclosed area to see the region, click to fill it. The fill is an object pinned to that region: move a boundary and it follows.';
     default:
       return 'Select — drag a node; the engine solves the constraints as you go.';
   }

@@ -280,6 +280,17 @@ pub fn apply(
             let at = scalar(scalars, "mirror axis")?;
             mirror(a, axis, at)
         }
+        // A Smart Fill is not a region *operation*: it does not combine its
+        // boundaries, it asks which face of their arrangement its seed is in,
+        // and that needs every boundary at once plus the seed point — none of
+        // which this signature (`inputs` already reduced to regions, `scalars`
+        // reduced to numbers) carries. `OperationsEvaluator` handles the kind
+        // before it gets here, and this arm is the proof that the region-pass
+        // entry point cannot silently do the wrong thing with it.
+        OperationKind::SmartFill { .. } => Err(OperationError::Arity {
+            expected: inputs.len(),
+            got: inputs.len(),
+        }),
     }
 }
 

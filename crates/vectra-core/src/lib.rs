@@ -36,7 +36,7 @@ pub mod procedural;
 pub mod style;
 pub mod summary;
 
-pub use command::{Command, CommandStack, EngineEvent, HistoryEntry};
+pub use command::{Command, CommandStack, EngineEvent, HistoryEntry, OutlinePath};
 pub use component::{
     bind_plan, design_size, icon_set_plan, infer_props, inspect, is_instance, is_master, master_of,
     members_of, owner_of, spec_of, BindPlan, ComponentProp, ComponentSpec, ComponentView, PropLaw,
@@ -45,13 +45,14 @@ pub use component::{
 pub use constraint::{Constraint, ConstraintKind, ConstraintRegistry, ConstraintTarget, Strength};
 pub use document::{
     Document, ExpressionRecord, Keyframe, MotionTrack, MotionTrackRegistry, Node, NodeKind,
-    OperationRecord, PathSegment, StyleProperties, DOCUMENT_VERSION,
+    OperationRecord, PathSegment, StyleProperties, TextAlign, TextPathBinding, DEFAULT_FONT_FAMILY,
+    DEFAULT_LINE_HEIGHT, DOCUMENT_VERSION,
 };
 pub use engine::{DispatchResult, Engine};
 pub use error::{ResolveError, VectraError};
 pub use eval::{
-    EvalMode, EvaluationContext, ExpressionEvaluator, InteractionProvider, MotionEvaluator,
-    ProceduralEvaluator, Resolvable,
+    EvalMode, EvaluationContext, ExpressionEvaluator, FontProvider, InteractionProvider,
+    MotionEvaluator, ProceduralEvaluator, Resolvable,
 };
 pub use geom::{Color, Point2};
 pub use ids::{

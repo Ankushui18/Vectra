@@ -161,6 +161,20 @@
  * Steps 65-68 drive the **built** binary in `src/wasm/`, which is what makes
  * this file the end-to-end gate for the four Task 10.6 rules.
  *
+ * Task 11.0 additions (advanced parametric typography):
+ *  72. A text node creates, shapes and snapshots: the run's metrics are in the
+ *      snapshot, and its letterforms are real path geometry (`d`) — the renderer
+ *      tessellates text by tessellating a path (RULE 4).
+ *  73. **The Parametric Text Law** at the boundary: a `font_size` driven by a
+ *      `$variable` re-lays the run out on the next read — the box scales with
+ *      the size and the drawn geometry changes with it.
+ *  74. **Text on a path** (RULE 2): binding a run to a circle takes it off its
+ *      baseline and onto the curve, a non-path source is refused, and an
+ *      `offset` slides the run along the arc.
+ *  75. **Outline** (RULE 3): the engine mints the letterform nodes, groups them,
+ *      hides the type it replaced, draws the same picture — and one undo puts
+ *      the document back byte for byte.
+ *
  * Task 10.7 additions (the "Procreate" layer — RULE 1 and RULE 2 are the UI's,
  * so the engine's gate is RULE 3 and RULE 4's command half):
  *  69. **Alpha Lock** is a boundary, not a rewrite: the flag costs zero
@@ -198,7 +212,7 @@ if (!existsSync(gluePath) || !existsSync(wasmPath)) {
 const glue = await import(pathToFileURL(gluePath).href);
 await glue.default({ module_or_path: readFileSync(wasmPath) });
 const engine = new glue.VectraEngine();
-console.log('smoke[1/71]: WASM instantiated');
+console.log('smoke[1/75]: WASM instantiated');
 
 const dispatch = (cmd) => JSON.parse(engine.dispatch_command(JSON.stringify(cmd)));
 const snapshot = () => JSON.parse(engine.get_snapshot());
@@ -221,7 +235,7 @@ const created = dispatch({
 assert.equal(created.status, 'ok', `CreateNode failed: ${JSON.stringify(created)}`);
 assert.ok(eventTypes(created).includes('NodesUpdated'), 'missing NodesUpdated');
 assert.ok(eventTypes(created).includes('OrderChanged'), 'missing OrderChanged');
-console.log('smoke[2/71]: CreateNode ok + NodesUpdated/OrderChanged');
+console.log('smoke[2/75]: CreateNode ok + NodesUpdated/OrderChanged');
 
 // 3. get_snapshot reflects the new node.
 let snap = snapshot();
@@ -232,7 +246,7 @@ assert.equal(snap.scene.nodes[id].primitive.type, 'circle');
 assert.equal(snap.scene.nodes[id].primitive.r, 50.0);
 assert.equal(snap.can_undo, true);
 assert.equal(snap.can_redo, false);
-console.log('smoke[3/71]: snapshot reflects node');
+console.log('smoke[3/75]: snapshot reflects node');
 
 // 4. Variable bind + resolve flows through the snapshot.
 let res = dispatch({ type: 'SetVariable', name: 'base', value: 200.0 });
@@ -247,7 +261,7 @@ assert.equal(res.status, 'ok');
 snap = snapshot();
 assert.equal(snap.variables.base, 200.0);
 assert.equal(snap.scene.nodes[id].primitive.r, 200.0, 'bound radius must resolve');
-console.log('smoke[4/71]: $base=200 drives radius → 200');
+console.log('smoke[4/75]: $base=200 drives radius → 200');
 
 // 5. Invalid expressions fail typed WITHOUT mutating.
 const invalid = dispatch({
@@ -259,7 +273,7 @@ assert.equal(invalid.status, 'error');
 assert.match(invalid.message, /invalid expression/);
 snap = snapshot();
 assert.deepEqual(snap.expressions, {}, 'no record pushed for invalid source');
-console.log('smoke[5/71]: invalid define fails typed, no record pushed');
+console.log('smoke[5/75]: invalid define fails typed, no record pushed');
 
 // 6. Valid define compiles; expression-bound radius evaluates via bytecode.
 const exprId = crypto.randomUUID();
@@ -280,7 +294,7 @@ assert.equal(res.status, 'ok');
 snap = snapshot();
 assert.equal(snap.expressions[exprId], '$base * 2 + 10');
 assert.equal(snap.scene.nodes[id].primitive.r, 410.0, 'bytecode eval: 200*2+10');
-console.log('smoke[6/71]: define → bind → radius 410 via bytecode');
+console.log('smoke[6/75]: define → bind → radius 410 via bytecode');
 
 // 7. undo unwinds the stack with inverse events.
 let undone = JSON.parse(engine.undo()); // drop BindExpr → $base bind (200)
@@ -302,7 +316,7 @@ snap = snapshot();
 assert.deepEqual(snap.scene.z_order, []);
 assert.equal(snap.can_undo, false);
 assert.equal(snap.can_redo, true);
-console.log('smoke[7/71]: undo ×5 unwinds stack, registry stays in sync');
+console.log('smoke[7/75]: undo ×5 unwinds stack, registry stays in sync');
 
 // 8. Failures are typed envelopes, never throws.
 const malformed = dispatch({ type: 'Nope' });
@@ -319,7 +333,7 @@ assert.match(unknown.message, /node not found/);
 const emptyUndo = JSON.parse(engine.undo());
 assert.equal(emptyUndo.status, 'error', 'undo on empty stack must error typed');
 assert.match(emptyUndo.message, /nothing to undo/);
-console.log('smoke[8/71]: malformed/unknown/empty-undo all fail typed');
+console.log('smoke[8/75]: malformed/unknown/empty-undo all fail typed');
 
 // ── Task 10.1 helpers ──────────────────────────────────────────────────────
 
@@ -428,7 +442,7 @@ const edgeSet = new Set(view.edges.map((e) => `${e.from}->${e.to}`));
 assert.ok(edgeSet.has(`${keyOf(propRect)}->${keyOf(varBase)}`), 'rect.width depends on $base');
 assert.ok(edgeSet.has(`${keyOf(exprFx)}->${keyOf(varBase)}`), 'ƒx depends on $base');
 assert.ok(edgeSet.has(`${keyOf(propIdle)}->${keyOf(exprFx)}`), 'idle.radius depends on ƒx');
-console.log('smoke[9/71]: graph export = 4 vertices / 3 edges, acyclic');
+console.log('smoke[9/75]: graph export = 4 vertices / 3 edges, acyclic');
 
 // 10. Edit $base: ONLY its dependents re-evaluate, incrementally.
 const before = gsnap();
@@ -445,7 +459,7 @@ assert.equal(after.eval.last_mode, 'incremental');
 assert.equal(after.scene.nodes[rect].primitive.w, 320.0, 'rect.width ← $base patched');
 assert.equal(after.scene.nodes[idle].primitive.r, 650.0, 'circle.radius ← ƒx patched (320*2+10)');
 assert.equal(after.scene.nodes[rect].primitive.h, 40.0, 'unrelated params untouched');
-console.log('smoke[10/71]: $base edit → Dirty = [rect, idle], patched incrementally (full_evals still 1)');
+console.log('smoke[10/75]: $base edit → Dirty = [rect, idle], patched incrementally (full_evals still 1)');
 
 // 11. An edit nothing depends on is a no-op — visibly empty, not "everything".
 gres = gsend({ type: 'SetVariable', name: 'lonely', value: 7.0 });
@@ -453,7 +467,7 @@ dirty = dirtyOf(gres);
 assert.deepEqual(dirty.ids, [], 'no dependents ⇒ empty dirty set');
 assert.equal(dirty.mode, 'incremental');
 assert.equal(gsnap().eval.last_evaluated, 0, 'nothing was evaluated');
-console.log('smoke[11/71]: edit with no dependents → Dirty.ids = [] and 0 evaluations');
+console.log('smoke[11/75]: edit with no dependents → Dirty.ids = [] and 0 evaluations');
 
 // 12. Undo/redo keeps the graph exact — vertices and edges leave and return.
 //     Stack at this point (top last): SetVariable base, CreateNode rect,
@@ -490,7 +504,7 @@ assert.deepEqual([...dirtyOf(gres).ids].sort(), [rect, idle].sort());
 gres = JSON.parse(graph.redo()); // redo SetVariable lonely
 assert.deepEqual(dirtyOf(gres).ids, []);
 assert.equal(gsnap().scene.nodes[idle].primitive.r, 650.0, 'back to the local optimum');
-console.log('smoke[12/71]: undo/redo adds and removes graph vertices/edges exactly');
+console.log('smoke[12/75]: undo/redo adds and removes graph vertices/edges exactly');
 
 // 13. Full rebuild ≡ incremental patch, and it says so.
 const incremental = JSON.stringify(gsnap().scene);
@@ -505,7 +519,7 @@ dirty = dirtyOf(gres);
 assert.equal(dirty.mode, 'incremental', 'the cache stays warm after a full sweep');
 assert.equal(gsnap().eval.full_evals, 2, 'and no further full rebuild happens');
 assert.equal(gsnap().scene.nodes[rect].primitive.w, 100.0);
-console.log('smoke[13/71]: force_full_evaluation ≡ incremental scene (patch ≡ rebuild)');
+console.log('smoke[13/75]: force_full_evaluation ≡ incremental scene (patch ≡ rebuild)');
 
 // ── Task 3.1: linear constraints (Cassowary) ────────────────────────────
 
@@ -589,7 +603,7 @@ assert.deepEqual(
   [vertical],
   'the constraint change is announced',
 );
-console.log('smoke[14/71]: Vertical constraint solved B.x ← A.x; link to $base broken and reported');
+console.log('smoke[14/75]: Vertical constraint solved B.x ← A.x; link to $base broken and reported');
 
 // 15. A PLAIN write to A.x (the Task 3.1 path — no gesture) still re-solves
 //     the rule and moves B to the exact same value.
@@ -609,7 +623,7 @@ sview = ssnap();
 assert.equal(xOf(sview, 'a'), 150);
 assert.equal(xOf(sview, 'b'), 150, 'B matches A exactly');
 assert.equal(sview.eval.full_evals, 1, 'a constraint solve is never a full re-evaluation');
-console.log('smoke[15/71]: a plain write to A.x moves B exactly, incrementally (full_evals still 1)');
+console.log('smoke[15/75]: a plain write to A.x moves B exactly, incrementally (full_evals still 1)');
 
 // 16. Undo walks back through the solver's writes, then the rule itself: the
 //     pair's geometry, the parametric link and the Cassowary variables all
@@ -645,7 +659,7 @@ assert.equal(sres.status, 'ok');
 sview = ssnap();
 assert.equal(xOf(sview, 'a'), 150);
 assert.equal(xOf(sview, 'b'), 150, 'redo replays drag + solve');
-console.log('smoke[16/71]: undo reverts (write+solve) then (rule+link); redo replays both');
+console.log('smoke[16/75]: undo reverts (write+solve) then (rule+link); redo replays both');
 
 // 17. Over-constrained: the weaker rule is dropped, visibly, and reported.
 // `Distance(c, d) = v` is the signed separation `c - d = v`, so c sits to the
@@ -669,7 +683,7 @@ assert.ok(
 assert.equal(sview.constraints[weak.constraint.id].enabled, false, 'the loser left the active set');
 assert.equal(sview.solver.dropped, 1);
 assert.equal(xOf(sview, 'c') - xOf(sview, 'd'), 100, 'the survivor still holds exactly');
-console.log('smoke[17/71]: 100 vs 200 → weaker dropped, disabled, diagnosed; survivor holds');
+console.log('smoke[17/75]: 100 vs 200 → weaker dropped, disabled, diagnosed; survivor holds');
 
 // 18. Required vs Required is a typed rejection with nothing applied.
 const required = (value) => constraintOf('distance', [[nodes.c, 'x'], [nodes.d, 'x']], 'required', value);
@@ -678,7 +692,7 @@ const rejected = ssend(required(777));
 assert.equal(rejected.status, 'error', `required contradiction must fail: ${JSON.stringify(rejected)}`);
 assert.ok(rejected.message.startsWith('unsatisfiable constraints:'), rejected.message);
 assert.equal(ssnap().solver.dropped, 0, 'a rejection is not a drop');
-console.log('smoke[18/71]: required/required contradiction → typed error, zero mutation');
+console.log('smoke[18/75]: required/required contradiction → typed error, zero mutation');
 
 // 19. BeginDrag registers the pointer's slots as Cassowary EDIT variables
 //     (RULE 1: `add_edit_variable` — never a re-solved SetParameter), and
@@ -698,7 +712,7 @@ sview = ssnap();
 assert.equal(sview.solver.active_edits, 2, 'x and y are live edit variables');
 assert.equal(sview.solver.drag_node, nodes.e, 'the snapshot names the dragged node');
 assert.equal(xOf(sview, 'e'), 100, 'BeginDrag moves nothing');
-console.log('smoke[19/71]: BeginDrag registers EDIT variables (RULE 1) and moves nothing');
+console.log('smoke[19/75]: BeginDrag registers EDIT variables (RULE 1) and moves nothing');
 
 // 20. UpdateDrag samples carry ABSOLUTE pointer coordinates: the anchor and its
 //     constrained partner both move, with no full re-evaluation. While the
@@ -719,7 +733,7 @@ const refused = ssend({
 assert.equal(refused.status, 'error', `mid-gesture write must be refused: ${JSON.stringify(refused)}`);
 assert.ok(refused.message.includes('is in progress'), refused.message);
 assert.equal(xOf(ssnap(), 'f'), 250, 'the refusal mutated nothing');
-console.log('smoke[20/71]: UpdateDrag moves anchor + partner exactly; writes refused mid-gesture');
+console.log('smoke[20/75]: UpdateDrag moves anchor + partner exactly; writes refused mid-gesture');
 
 // 21. EndDrag finalizes the suggested values in the document as literals (the
 //     solution is geometry, never a link) and empties the registry. The whole
@@ -748,7 +762,7 @@ assert.ok(rule2.constraint.id in sview.constraints, 'the gesture did not touch t
 sres = JSON.parse(solver.redo());
 assert.equal(sres.status, 'ok');
 assert.equal(xOf(ssnap(), 'e'), 250, 'redo replays the net movement without a solver');
-console.log('smoke[21/71]: EndDrag persists literals + clears the registry; 1 undo reverts it all');
+console.log('smoke[21/75]: EndDrag persists literals + clears the registry; 1 undo reverts it all');
 
 // ── Task 4.0: non-destructive operations ────────────────────────────────
 // A fresh engine, so the numbers below are the operation layer's own.
@@ -808,7 +822,7 @@ assert.equal(
   'the source is untouched by the operation',
 );
 assert.ok(opD.includes('M'), `operation geometry looks like a path: ${opD}`);
-console.log('smoke[22/71]: ApplyOperation → virtual path node; sources stay in the scene');
+console.log('smoke[22/75]: ApplyOperation → virtual path node; sources stay in the scene');
 
 // 23. The non-destructive law: moving a source re-runs the operation, never the
 //     other way round. `hole` moves 40 to the right → the cut moves with it
@@ -828,7 +842,7 @@ ov = osnap();
 assert.equal(JSON.stringify(ov.scene.nodes[plate]), plateNode, 'partner node is byte-identical');
 assert.notEqual(JSON.stringify(ov.scene.nodes[hole]), holeNode, 'the moved source re-evaluated');
 assert.notEqual(ov.scene.nodes[op].primitive.d, opD, 'and so did the operation');
-console.log('smoke[23/71]: a source move re-runs only the dependent operation');
+console.log('smoke[23/75]: a source move re-runs only the dependent operation');
 
 // 24. Parking vs removing, and the typed refusal of a stray operand.
 ores = osend({ type: 'SetOperationEnabled', id: op, enabled: false });
@@ -858,7 +872,7 @@ assert.ok(ov.scene.z_order.includes(plate) && ov.scene.z_order.includes(hole), '
 assert.ok(ores.events.some((e) => e.type === 'Dirty'), 'the removal re-evaluated the scene');
 ores = osend({ type: 'RemoveOperation', id: op });
 assert.equal(ores.status, 'error', 'removing it twice is a typed error, not a crash');
-console.log('smoke[24/71]: park → re-enable → remove; arity + double-remove are typed');
+console.log('smoke[24/75]: park → re-enable → remove; arity + double-remove are typed');
 
 // ── Task 5.0: the WebGPU canvas (a dumb consumer of EvaluatedScene) ─────
 // A fresh engine plus a crenderer on an 800×600 canvas. Node has no WebGPU, so
@@ -954,7 +968,7 @@ assert.equal(hitAt(325, 575), null, 'and its old home is empty');
 const cstats = JSON.parse(crenderer.stats());
 assert.equal(cstats.ready, false);
 assert.equal(cstats.nodes, 2, 'the canvas still holds exactly two nodes');
-console.log('smoke[25/71]: pointer → NodeId → BeginDrag/UpdateDrag/EndDrag, and the index follows');
+console.log('smoke[25/75]: pointer → NodeId → BeginDrag/UpdateDrag/EndDrag, and the index follows');
 
 // ── Task 6.0: motion ───────────────────────────────────────────────────
 //
@@ -1026,7 +1040,7 @@ assert.equal(mvalue(mover, 'width'), 200, 'the transition starts at the off valu
 mengine.set_time(0.15);
 const midMotion = mvalue(mover, 'width');
 assert.ok(midMotion > 200 && midMotion < 320, `easing, not jumping: ${midMotion}`);
-console.log('smoke[26/71]: hover flip re-anchors the spring → it eases from where it was');
+console.log('smoke[26/75]: hover flip re-anchors the spring → it eases from where it was');
 
 // 28. Purity + the idle signal.
 const sample = (t) => {
@@ -1054,7 +1068,7 @@ const idleFrame = mframe();
 assert.equal(idleFrame.writes, 0, `a stopped scene draws for free: ${JSON.stringify(idleFrame)}`);
 assert.equal(idleFrame.bytes, 0, 'and costs zero bytes');
 assert.equal(idleFrame.dirty, 0, 'and has nothing to reconcile');
-console.log('smoke[27/71]: same t ⇒ same scene; idle at the horizon ⇒ the loop can stop');
+console.log('smoke[27/75]: same t ⇒ same scene; idle at the horizon ⇒ the loop can stop');
 
 // 29. Undo isolation.
 const depthBefore = undoDepth();
@@ -1077,7 +1091,7 @@ assert.equal(mstatus().bindings.length, 0, 'undo removed the binding');
 const redoOnce = JSON.parse(mengine.redo());
 assert.equal(redoOnce.status, 'ok', JSON.stringify(redoOnce));
 assert.equal(mstatus().bindings.length, 1, 'and redo restored it');
-console.log('smoke[28/71]: motion samples are not history (60 frames, 0 entries)');
+console.log('smoke[28/75]: motion samples are not history (60 frames, 0 entries)');
 
 // 30. Interaction precedence — and note the law is *per slot*: the spring on
 //     `width` is not what the pointer touches, so only `x` changes hands.
@@ -1129,7 +1143,7 @@ assert.equal(
 msend({
   type: 'SetParameter', node_id: mover, property: 'x', value: { Float: { Literal: 620 } },
 });
-console.log('smoke[29/71]: a drag outranks a spring, hands it back, and only on its own slot');
+console.log('smoke[29/75]: a drag outranks a spring, hands it back, and only on its own slot');
 
 // 31. Keyframe tracks (the other half of MES §12).
 const track = {
@@ -1172,7 +1186,7 @@ assert.equal(badTrack.status, 'error', 'non-monotone times are refused typed');
 const trackRemoved = JSON.parse(mengine.remove_motion_track('intro'));
 assert.equal(trackRemoved.status, 'ok', JSON.stringify(trackRemoved));
 assert.equal(mstatus().tracks.length, 0, 'the registry is empty again');
-console.log('smoke[30/71]: tracks register, sample, re-sample on edit, and refuse malformed input');
+console.log('smoke[30/75]: tracks register, sample, re-sample on edit, and refuse malformed input');
 
 // ── Task 7.0: the procedural graph ─────────────────────────────────────
 
@@ -1211,7 +1225,7 @@ assert.equal(
   pview.nodes[0].name,
   'and the inspector can name it (RULE 4)',
 );
-console.log('smoke[31/71]: the palette is the engine\'s table, and a node from it composes');
+console.log('smoke[31/75]: the palette is the engine\'s table, and a node from it composes');
 
 // 33. The gates: a type mismatch, a disguised cycle, a real cycle.
 const prect = crypto.randomUUID();
@@ -1275,7 +1289,7 @@ const cycle = psend({
 assert.equal(cycle.status, 'error', 'a wire that closes the chain is refused');
 assert.match(cycle.message, /cycl/i);
 assert.equal(JSON.stringify(pstatus()), beforeGates, 'every refusal left the graph as it was');
-console.log('smoke[32/71]: typed refusals — port type, disguised cycle, real cycle');
+console.log('smoke[32/75]: typed refusals — port type, disguised cycle, real cycle');
 
 // 34. A slot that reads a port follows it in the same dispatch.
 assert.equal(
@@ -1296,7 +1310,7 @@ assert.equal(
   75,
   'the reader followed the republished port in the SAME settle',
 );
-console.log('smoke[33/71]: a republished port reaches its readers within one settle');
+console.log('smoke[33/75]: a republished port reaches its readers within one settle');
 
 // 35. RULE 4: an unrelated operation pass cannot evict the result.
 const q1 = crypto.randomUUID();
@@ -1339,7 +1353,7 @@ assert.equal(
   'ok',
 );
 assert.equal(pnode(smoothId).wires.region, wireBefore, 'undo restored the node AND its wire');
-console.log('smoke[34/71]: RULE 4 holds — survives an operation pass, parks, re-arms, undoes');
+console.log('smoke[34/75]: RULE 4 holds — survives an operation pass, parks, re-arms, undoes');
 
 // 36. Determinism, patch ≡ rebuild, and a mutation nothing depends on.
 const build = () => {
@@ -1395,7 +1409,7 @@ assert.equal(untouched.status, 'ok');
 const pDirty = untouched.events.find((event) => event.type === 'Dirty');
 // A variable nothing reads is not a node: the dirty set names no geometry.
 assert.deepEqual(pDirty.ids, [], 'nothing depended on it, so nothing re-ran');
-console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty set');
+console.log('smoke[35/75]: determinism, patch ≡ rebuild, and an empty dirty set');
 
 // ── Task 8.0: the export boundary ──────────────────────────────────────────
 // 37. `export_to_svg` writes a SEMANTIC document: a circle is a `<circle>`, an
@@ -1426,7 +1440,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   assert.deepEqual(envelope.warnings, [], 'nothing to warn about');
   // The same engine, exported twice: identical bytes.
   assert.equal(xengine.export_to_svg(), xengine.export_to_svg());
-  console.log('smoke[36/71]: semantic SVG — <circle>, one A command, no approximations');
+  console.log('smoke[36/75]: semantic SVG — <circle>, one A command, no approximations');
 }
 
 // 38. `export_to_react` writes a PARAMETRIC component (Task 8.0 RULE 2): the
@@ -1460,7 +1474,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   // picture, code is code.
   const svg = JSON.parse(rengine.export_to_svg());
   assert.ok(svg.code.includes('width="80"'), 'SVG carries the resolved number');
-  console.log('smoke[37/71]: parametric React — $base * 2 → width={base * 2} + a required prop');
+  console.log('smoke[37/75]: parametric React — $base * 2 → width={base * 2} + a required prop');
 }
 
 // 39. The export sees the LIVE scene: a spring-driven slot exports the number
@@ -1494,7 +1508,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     envelope.code.includes(`height="${drawnText}"`),
     `the file carries the drawn number (${drawnText})`,
   );
-  console.log('smoke[38/71]: the export reads the live scene and says when a number is a sample');
+  console.log('smoke[38/75]: the export reads the live scene and says when a number is a sample');
 }
 
 // ── Task 9.0: the AI command layer ──────────────────────────────────────
@@ -1550,7 +1564,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   const phrasings = JSON.parse(aengine.ai_phrasings());
   assert.ok(phrasings.length > 5 && phrasings.every((line) => typeof line === 'string'),
     'the hint line is engine data: ' + JSON.stringify(phrasings));
-  console.log('smoke[39/71]: the engine publishes summary + system prompt + planner hints (RULE 2)');
+  console.log('smoke[39/75]: the engine publishes summary + system prompt + planner hints (RULE 2)');
 }
 
 // 41. RULE 1 + the preview path: the AI answers in COMMANDS, resolved against
@@ -1606,7 +1620,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     undefined,
     'the preview pushed a history entry',
   );
-  console.log('smoke[40/71]: a preview plans resolved commands and applies nothing');
+  console.log('smoke[40/75]: a preview plans resolved commands and applies nothing');
 }
 
 // 42. The approved plan runs through `dispatch_command` — the SAME path a click
@@ -1677,7 +1691,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   const dirty = moved.events.find((e) => e.type === 'Dirty');
   assert.deepEqual(dirty.ids, [card], 'the AI-authored expression is a live dependency');
   assert.equal(JSON.parse(aengine.get_snapshot()).scene.nodes[card].primitive.w, 200);
-  console.log('smoke[41/71]: the approved plan ran through dispatch, undid and redid step by step');
+  console.log('smoke[41/75]: the approved plan ran through dispatch, undid and redid step by step');
 }
 
 // 43. RULE 3: the self-correction loop. A command the engine refuses is fed
@@ -1717,7 +1731,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     2,
     'one entry for the creation, one for the accepted attempt — a refused plan leaves no trace',
   );
-  console.log('smoke[42/71]: the engine’s refusal became a correction and attempt 2 landed');
+  console.log('smoke[42/75]: the engine’s refusal became a correction and attempt 2 landed');
 }
 
 // 44. Graceful failure: an incomprehensible prompt and a hallucinated id both
@@ -1755,7 +1769,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   assert.equal(broken.code, 'invalid-json');
 
   assert.equal(aengine.get_snapshot(), before, 'nothing above changed the document');
-  console.log('smoke[43/71]: refusal is typed, explained, and leaves no trace');
+  console.log('smoke[43/75]: refusal is typed, explained, and leaves no trace');
 }
 
 // 45. Task 10.0's save path: the engine serializes its **own** document.
@@ -1799,7 +1813,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     summary.nodes[0].slots.some((slot) => slot.source === '$base * 2'),
     'the parametric source is visible to both surfaces',
   );
-  console.log('smoke[44/71]: the engine serializes its own document (the .vectra save path)');
+  console.log('smoke[44/75]: the engine serializes its own document (the .vectra save path)');
 }
 
 
@@ -1879,7 +1893,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
       'the broken handle curves the segment leaving the anchor, unchanged by Alt-breaking',
     );
     assert.deepEqual(committedPath.segments[2].Line.to.Literal, { x: 180, y: 10 });
-    console.log('smoke[45/71]: the pen — click, drag, Alt-drag, and what the handles do (RULE 2)');
+    console.log('smoke[45/75]: the pen — click, drag, Alt-drag, and what the handles do (RULE 2)');
   }
 
   // 46. **Closing and finishing** (RULE 2's last two gestures). Clicking the
@@ -1917,7 +1931,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     const finishedPath = JSON.parse(fengine.document_json()).nodes[finished.node_id].kind.Path;
     assert.equal(finishedPath.segments.length, 1);
     assert.equal(segmentKind(finishedPath.segments[0]), 'Line');
-    console.log('smoke[46/71]: click the first point closes; commit without closing does not');
+    console.log('smoke[46/75]: click the first point closes; commit without closing does not');
   }
 
   // 47. **The brush** (RULE 3, first half). A freehand stroke is captured with
@@ -1966,7 +1980,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     const arcPath = JSON.parse(bengine.document_json()).nodes[arcCommit.node_id].kind.Path;
     const cubics = arcPath.segments.map(segmentKind).filter((kind) => kind === 'Cubic').length;
     assert.ok(cubics >= 6, 'the shape is made of curve segments, not a polygon');
-    console.log('smoke[47/71]: the brush — fitted to curves, closed ring, pressure captured');
+    console.log('smoke[47/75]: the brush — fitted to curves, closed ring, pressure captured');
   }
 
   // 48. **Quick Shape** (RULE 3, second half, and the heart of the task): a
@@ -2055,7 +2069,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
         `anchor ${index} is a cardinal: ${anchor.x},${anchor.y} vs ${expected}`,
       );
     });
-    console.log('smoke[48/71]: Quick Shape — a jagged stroke became a constrained perfect circle');
+    console.log('smoke[48/75]: Quick Shape — a jagged stroke became a constrained perfect circle');
   }
 
   // 49. **Direct selection** (RULE 4). Hit-testing is spatial — anchors win over
@@ -2155,7 +2169,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     const undone = JSON.parse(eengine.draw_overlay(pathId));
     assert.equal(undone.anchors[1].x, 50, 'one undo restored the shape');
     assert.equal(undone.anchors[1].y, 0);
-    console.log('smoke[49/71]: direct selection — hit test, solo point, mirror, Alt breaks it, 1 undo');
+    console.log('smoke[49/75]: direct selection — hit test, solo point, mirror, Alt breaks it, 1 undo');
   }
 
   // 50. **The overlay's camera** (RULE 4's "show the handles where they are").
@@ -2179,7 +2193,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     // A canvas with no box has no camera, and the honest answer is `null` rather
     // than a document point invented from an unmeasured window.
     assert.equal(new glue.Renderer().pointer_doc(10, 10), 'null', 'no box ⇒ no coordinate guess');
-    console.log('smoke[50/71]: the overlay is placed by the engine’s camera (document y-up ↔ DOM y-down)');
+    console.log('smoke[50/75]: the overlay is placed by the engine’s camera (document y-up ↔ DOM y-down)');
   }
 
   // 51. **The workspace a new document opens into** (Task 10.2 RULES 1-2).
@@ -2194,7 +2208,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     assert.deepEqual(snap.artboards[0].bounds, [0, 0, 800, 600], 'framed like the opening camera');
     assert.equal(snap.active_layer, snap.layers[0].id, 'and it is the active one');
     assert.equal(snap.active_artboard, snap.artboards[0].id);
-    console.log('smoke[51/71]: a new document opens on one artboard with one layer');
+    console.log('smoke[51/75]: a new document opens on one artboard with one layer');
   }
 
   // 52. **RULE 4, driven through the JSON the React remote sends.** Hiding a
@@ -2255,7 +2269,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     const locked = frame();
     assert.equal(locked.writes, 0);
     assert.equal(JSON.parse(engine.get_snapshot()).scene.nodes[c].locked, true, 'locked, not hidden');
-    console.log('smoke[52/71]: RULE 4 across the wire — the eye works and writes nothing');
+    console.log('smoke[52/75]: RULE 4 across the wire — the eye works and writes nothing');
   }
 
   // 53. **RULE 3: the brief's own example**, end to end. A thick black stroke
@@ -2347,7 +2361,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     assert.equal(paint.type, 'linear');
     assert.equal(paint.stops.length, 3, 'all three stops survive the round trip');
     assert.equal(paint.stops[1].offset, 0.5);
-    console.log('smoke[53/71]: RULE 3 — stacked strokes, a blend mode, a gradient ramp');
+    console.log('smoke[53/75]: RULE 3 — stacked strokes, a blend mode, a gradient ramp');
   }
 
   // 54. **RULE 2: artboards — jump, frame, export.** The dropdown's jump is the
@@ -2421,7 +2435,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     assert.ok(all.code.includes(`data-vectra-artboard="${logo}"`));
     assert.ok(all.code.includes(`data-vectra-artboard="${icon}"`));
     assert.ok(all.code.includes(dot) && all.code.includes(mark), 'both boards artwork');
-    console.log('smoke[54/71]: RULE 2 — boards jump, frame, and export current vs all');
+    console.log('smoke[54/75]: RULE 2 — boards jump, frame, and export current vs all');
   }
 
   // 55. **The Layers Panel's own contract, in one gesture.** Reordering a layer
@@ -2467,7 +2481,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     const reordered = JSON.parse(engine.render_frame(renderer));
     assert.equal(reordered.writes, 0, `nothing is re-uploaded: ${JSON.stringify(reordered)}`);
     assert.equal(reordered.draw_calls, 2, 'the same two items, in the other order');
-    console.log('smoke[55/71]: RULE 1 — moving a layer moves its artwork, for free');
+    console.log('smoke[55/75]: RULE 1 — moving a layer moves its artwork, for free');
   }
 
   // 56. **Pan and zoom (Task 10.3 RULE 2).** The camera gestures every editor
@@ -2547,7 +2561,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     blank.nav_pan(50, 50);
     assert.equal(blank.view(), untouched, 'an unmeasured canvas has no camera to move');
 
-    console.log('smoke[56/71]: RULE 2 — pan and zoom keep the pointer honest');
+    console.log('smoke[56/75]: RULE 2 — pan and zoom keep the pointer honest');
   }
 
   // 57. **A group inside a group is a row the panel can nest (Task 10.4 RULE 1).**
@@ -2611,7 +2625,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     const after = JSON.parse(engine.get_snapshot()).layers[0];
     assert.equal(after.child_can_open[after.children.indexOf(empty)], false);
 
-    console.log('smoke[57/71]: RULE 1 — a group inside a group is a row that opens');
+    console.log('smoke[57/75]: RULE 1 — a group inside a group is a row that opens');
   }
 
   // 58. **A board's box and colour are editable (Task 10.3 RULE 2)** — and
@@ -2672,7 +2686,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     assert.ok(svg.code.includes(`data-vectra-artboard="${board}"`), 'for the board that was edited');
     assert.ok(svg.code.includes(`data-vectra-node="${art}"`), 'and the artwork is still on it');
 
-    console.log('smoke[58/71]: RULE 2 — a board’s box and background, edited for free');
+    console.log('smoke[58/75]: RULE 2 — a board’s box and background, edited for free');
   }
 
   // 59. **Grouping is one action, and the engine refuses the impossible**
@@ -2802,7 +2816,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     assert.equal(after.find(([name]) => name === 'First')[1], null, 'First left the group');
     assert.equal(after.find(([name]) => name === 'Second')[1], groupId, 'Second stayed');
 
-    console.log('smoke[59/71]: RULE 1 — grouping is one undo, and cycles are refused');
+    console.log('smoke[59/75]: RULE 1 — grouping is one undo, and cycles are refused');
   }
 
   // 60. **The canvas does not know what a group is** (Task 10.4 RULE 1). The
@@ -2870,7 +2884,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     const outside = JSON.parse(renderer.document_to_client(JSON.stringify([[190, 190]]))).points[0];
     assert.equal(renderer.pointer_hit(outside[0], outside[1]), under, 'and the one beneath it');
 
-    console.log('smoke[60/71]: RULE 1 — the canvas draws the tree without knowing it is one');
+    console.log('smoke[60/75]: RULE 1 — the canvas draws the tree without knowing it is one');
   }
 
   // 61. **Moving a group moves its children, in a layered document too**
@@ -2924,7 +2938,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     send({ type: 'SetNodeParent', id: a, parent: null, index: 0 });
     assert.deepEqual(names()[0], 'A', 'a shape is not a block');
 
-    console.log('smoke[61/71]: RULE 1 — a group carries its subtree in the z-order');
+    console.log('smoke[61/75]: RULE 1 — a group carries its subtree in the z-order');
   }
 
   // 62. **A drop into another layer is one batch — and one undo** (Task 10.4
@@ -3028,7 +3042,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     );
     assert.equal(layerOf(grid).id, guides);
 
-    console.log('smoke[62/71]: RULE 1 — a drop into another layer is one batch, one undo');
+    console.log('smoke[62/75]: RULE 1 — a drop into another layer is one batch, one undo');
   }
 
   // 63. **The ▣ button, on a selection that spans layers.** The members that live
@@ -3093,7 +3107,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     assert.equal(JSON.parse(engine.get_snapshot()).layers.filter((l) => l.children.includes(badge2)).length, 0);
     assert.equal(JSON.parse(engine.redo()).status, 'ok', 'and redo groups them again');
 
-    console.log('smoke[63/71]: RULE 1 — a selection that spans layers undoes layer by layer');
+    console.log('smoke[63/75]: RULE 1 — a selection that spans layers undoes layer by layer');
   }
 
   // 64. **A placement lands *between* runs, never inside one** (Task 10.5). The
@@ -3184,7 +3198,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
     assert.equal(retired.status, 'error', JSON.stringify(retired));
     assert.match(retired.message, /ReorderNode/, retired.message);
 
-    console.log('smoke[64/71]: RULE 1 — a placement lands between runs, and one verb places');
+    console.log('smoke[64/75]: RULE 1 — a placement lands between runs, and one verb places');
   }
 }
 
@@ -3294,7 +3308,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   // One undo takes the size back, and the instance is a copy again.
   assert.equal(JSON.parse(sengine.undo()).status, 'ok');
   assert.deepEqual(numbers(cloneRect()), { w: 24, r: 4, s: 2 }, 'one undo, and it is a copy');
-  console.log('smoke[65/71]: RULE 1 — a master, a prop, one instance, and the scaling law');
+  console.log('smoke[65/75]: RULE 1 — a master, a prop, one instance, and the scaling law');
 }
 
 // 66. **RULE 2 + RULE 4.** A prompt becomes commands the *engine* validates:
@@ -3349,7 +3363,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   assert.equal(refused.status, 'error', JSON.stringify(refused));
   assert.match(refused.message, /two shapes/, refused.message);
   assert.ok(!refused.message.includes('{'), `no JSON in a refusal either: ${refused.message}`);
-  console.log('smoke[66/71]: RULE 2 — prompts become commands, and refusals are sentences (RULE 4)');
+  console.log('smoke[66/75]: RULE 2 — prompts become commands, and refusals are sentences (RULE 4)');
 }
 
 // 67. **RULE 3.** "Generate Icon Set": one artboard per size, and the 2px stroke
@@ -3392,7 +3406,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   const sixteen = clones.find((clone) => clone.size === 16);
   assert.ok(sixteen.stroke >= 1.0, `no hairline at 16px: ${JSON.stringify(sixteen)}`);
   assert.ok(!set.prose.includes('{'), set.prose);
-  console.log('smoke[67/71]: RULE 3 — the icon ladder, and the stroke law at every size');
+  console.log('smoke[67/75]: RULE 3 — the icon ladder, and the stroke law at every size');
 }
 
 // 68. **RULE 4's other half: what the panels are fed.** The engine publishes the
@@ -3433,7 +3447,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   const prompt = pengine.ai_prompt();
   assert.ok(prompt.includes(only) && prompt.includes('SELECTION (1 node(s)'),
     'the prompt the model is grounded on carries the exact id it must use');
-  console.log('smoke[68/71]: RULE 4 — chips, prose and headlines come from the engine');
+  console.log('smoke[68/75]: RULE 4 — chips, prose and headlines come from the engine');
 }
 
 // 69. **RULE 3a — Alpha Lock is a boundary, not a rewrite.** The flag round-trips
@@ -3507,7 +3521,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   assert.ok(points.length >= 2, 'and it is still a stroke');
   assert.ok(points.every(([x, y]) => x >= 100 - 1e-6 && y >= 100 - 1e-6),
     'the alpha lock is a box, not an edge: nothing escaped sideways either');
-  console.log('smoke[69/71]: RULE 3a — alpha lock refuses the miss and clips the crossing');
+  console.log('smoke[69/75]: RULE 3a — alpha lock refuses the miss and clips the crossing');
 }
 
 // 70. **RULE 3b — a clipping mask is live geometry.** The upper layer shows only
@@ -3572,7 +3586,7 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   assert.deepEqual(restored.scene.nodes[over].primitive, before.scene.nodes[over].primitive,
     'the document geometry is back, byte for byte');
   assert.equal(restored.layers.find((l) => l.id === top).clipping_mask, false);
-  console.log('smoke[70/71]: RULE 3b — a layer shows only over the layer below, non-destructively');
+  console.log('smoke[70/75]: RULE 3b — a layer shows only over the layer below, non-destructively');
 }
 
 // 71. **RULE 4's engine half — ColorDrop.** The drop is decided by the renderer's
@@ -3621,9 +3635,598 @@ console.log('smoke[35/71]: determinism, patch ≡ rebuild, and an empty dirty se
   assert.equal(stack[0].kind, 'fill');
   assert.deepEqual(stack[0].paint, { type: 'solid', color: '#e8622c' },
     'and the colour that comes back is the one that was dropped');
-  console.log('smoke[71/71]: RULE 4 — the drop fills what the hit test found, and nothing else');
+  console.log('smoke[71/75]: RULE 4 — the drop fills what the hit test found, and nothing else');
+}
+
+// ── Task 11.0: parametric typography, end to end ───────────────────────────
+//
+// The four rules driven through the REAL module with nothing but JSON: place
+// type, bind it to a path, slide it, outline it, undo it. The assertions are
+// about what a designer would see — the run's box, where its glyphs are drawn,
+// what the layers panel would list afterwards.
+
+/// The Text tool's own payload, used by the three typography steps: every
+/// typographic number is a `Parameter`, exactly as the UI's `createText` sends
+/// them, so nothing below is a special case for the test's benefit.
+const runPayload = (text, fontSize) => ({
+  Text: {
+    text,
+    font_family: 'Vectra Sans',
+    font_size: { Literal: fontSize },
+    letter_spacing: { Literal: 0 },
+    line_height: { Literal: 1.2 },
+    alignment: 'left',
+    x: { Literal: 40 },
+    y: { Literal: 300 },
+  },
+});
+
+// 72. **A run draws.** A text node creates with every number parametric, shapes
+//     through the bundled face (no host font library involved), and reaches the
+//     snapshot as metrics *plus* real path geometry: the renderer tessellates
+//     text by tessellating a path, so a run's letterforms and a path's segments
+//     are the same kind of thing.
+{
+  const tengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(tengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(tengine.get_snapshot());
+
+  const run = crypto.randomUUID();
+  const created = send({
+    type: 'CreateNode',
+    id: run,
+    name: 'logo',
+    kind: {
+      Text: {
+        text: 'Vectra',
+        font_family: 'Vectra Sans',
+        font_size: { Literal: 64 },
+        letter_spacing: { Literal: 0 },
+        line_height: { Literal: 1.2 },
+        alignment: 'left',
+        x: { Literal: 40 },
+        y: { Literal: 300 },
+      },
+    },
+  });
+  assert.equal(created.status, 'ok', JSON.stringify(created));
+
+  const scene = snap().scene;
+  const node = scene.nodes[run];
+  assert.ok(node, 'the run is in the scene');
+  assert.equal(node.primitive.type, 'text', JSON.stringify(node.primitive).slice(0, 200));
+  assert.ok(node.primitive.glyphs >= 6, `six letters shaped: ${node.primitive.glyphs}`);
+  assert.ok(node.primitive.d.includes('M'), 'the run carries real outline geometry');
+  assert.ok(node.primitive.width > 0 && node.primitive.height > 0, 'and a box');
+
+  // The typography row the panel edits, resolved and tagged with its sources.
+  assert.equal(node.text.text, 'Vectra');
+  assert.equal(node.text.font_size, 64);
+  assert.equal(node.text.font_size_source, 'literal');
+  assert.equal(node.text.bound_to, null);
+
+  // The picker's options come from the engine's own font library.
+  assert.ok(scene.fonts.includes('Vectra Sans'), JSON.stringify(scene.fonts));
+  console.log('smoke[72/79]: RULE 1 — a parametric run shapes, snapshots and draws');
+}
+
+// 73. **The Parametric Text Law.** Bind `font_size` to a `$variable` and change
+//     the variable: the run is *already* re-laid out on the next read. The box
+//     scales with the size and the drawn geometry changes with it, because the
+//     variable write is the same one that moves a rectangle's width.
+{
+  const pengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(pengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(pengine.get_snapshot());
+  const run = crypto.randomUUID();
+  send({ type: 'CreateNode', id: run, name: 'scaled', kind: runPayload('Vectra', 64) });
+  const box = () => snap().scene.nodes[run].primitive;
+
+  send({ type: 'SetVariable', name: 'scale', value: 32 });
+  send({
+    type: 'SetParameter',
+    node_id: run,
+    property: 'font_size',
+    // A geometry slot's value is a `ParamValue`, not a bare parameter: the
+    // engine needs to know *which* of a node's three value kinds it is editing
+    // (a float, a point, a colour) before it can route it to a slot.
+    value: { Float: { Variable: 'scale' } },
+  });
+  const small = box();
+  assert.equal(snap().scene.nodes[run].text.font_size, 32, 'the slot resolves through the variable');
+  // The tag is the parameter's own `source_tag()` — the same vocabulary a
+  // rectangle's `x_source` speaks — not a name written for this step.
+  assert.equal(snap().scene.nodes[run].text.font_size_source, 'variable');
+
+  const events = send({ type: 'SetVariable', name: 'scale', value: 96 });
+  assert.ok(eventTypes(events).includes('Dirty'), 'a size change dirties the run');
+  const big = box();
+
+  const ratio = big.width / small.width;
+  assert.ok(Math.abs(ratio - 3) < 0.02, `the box scaled with the size: ${ratio}`);
+  assert.notEqual(big.d, small.d, 'and the letterforms were laid out again');
+  assert.ok(big.height > small.height, 'type grows upwards too');
+  console.log('smoke[73/79]: THE PARAMETRIC TEXT LAW — a variable re-lays out a run');
+}
+
+// 74. **Text on a path** (RULE 2). Bound to a circle the run leaves its baseline
+//     and rides the curve — the drawn geometry is somewhere else entirely — and
+//     an `offset` slides it along the arc. A source that is not path-shaped is
+//     refused *before* anything is written.
+{
+  const cengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(cengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(cengine.get_snapshot());
+
+  const circle = crypto.randomUUID();
+  send({
+    type: 'CreateNode',
+    id: circle,
+    kind: { Circle: { cx: { Literal: 0 }, cy: { Literal: 0 }, radius: { Literal: 200 } } },
+  });
+  const bound = crypto.randomUUID();
+  send({ type: 'CreateNode', id: bound, name: 'around', kind: runPayload('around', 40) });
+  const straight = snap().scene.nodes[bound].primitive.d;
+
+  const bind = send({
+    type: 'BindTextToPath',
+    node_id: bound,
+    path: circle,
+    offset: { Literal: 0 },
+  });
+  assert.equal(bind.status, 'ok', JSON.stringify(bind));
+  const onCircle = snap().scene.nodes[bound];
+  assert.equal(onCircle.text.bound_to, circle, 'the snapshot names the source');
+  assert.notEqual(onCircle.primitive.d, straight, 'the run is no longer straight');
+  assert.equal(onCircle.primitive.glyphs, 6, 'same six glyphs, different placement');
+
+  // A rectangle is not a path to ride: refused, and nothing was written.
+  const rect = crypto.randomUUID();
+  send({
+    type: 'CreateNode',
+    id: rect,
+    kind: {
+      Rectangle: {
+        x: { Literal: 0 },
+        y: { Literal: 0 },
+        width: { Literal: 10 },
+        height: { Literal: 10 },
+        corner_radius: { Literal: 0 },
+      },
+    },
+  });
+  const refused = send({
+    type: 'BindTextToPath',
+    node_id: bound,
+    path: rect,
+    offset: { Literal: 0 },
+  });
+  assert.equal(refused.status, 'error', 'a rectangle is not a path to ride');
+  assert.equal(snap().scene.nodes[bound].text.bound_to, circle, 'and nothing changed');
+
+  // The offset slides the run: the geometry moves, the string does not.
+  send({
+    type: 'SetParameter',
+    node_id: bound,
+    property: 'path_offset',
+    value: { Float: { Literal: 120 } },
+  });
+  const slid = snap().scene.nodes[bound];
+  assert.notEqual(slid.primitive.d, onCircle.primitive.d, 'the run slid along the arc');
+  assert.equal(slid.text.offset, 120);
+  assert.equal(slid.text.text, 'around');
+  console.log('smoke[74/79]: RULE 2 — a run rides the curve and slides along it');
+}
+
+// 75. **Outline** (RULE 3). The engine shapes the run itself, mints the
+//     letterform nodes, groups them and hides the type it replaced — and one
+//     undo puts the document back, byte for byte.
+{
+  const oengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(oengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(oengine.get_snapshot());
+
+  const text = crypto.randomUUID();
+  send({ type: 'CreateNode', id: text, name: 'word', kind: runPayload('out', 80) });
+  const before = snap();
+  const drawn = before.scene.nodes[text].primitive.d;
+  const beforeIds = new Set(Object.keys(before.scene.nodes));
+  const glyphs = before.scene.nodes[text].primitive.glyphs;
+
+  const reply = JSON.parse(oengine.outline_text(text));
+  assert.equal(reply.status, 'ok', JSON.stringify(reply));
+  const group = reply.created;
+  assert.ok(group, 'the reply names the group it made');
+
+  const after = snap();
+  // 1. The type is hidden, not deleted — and still holds every authored value.
+  assert.equal(after.scene.nodes[text].visible, false, 'the source run is hidden');
+  assert.equal(after.scene.nodes[text].text.text, 'out', 'and still says what it said');
+  // 2. One **new** node per shaped glyph, each a drawable path, and the group
+  //    that holds them is a real row of the layer tree.
+  const fresh = Object.keys(after.scene.nodes).filter((id) => !beforeIds.has(id));
+  assert.equal(fresh.length, glyphs, `one letterform per glyph: ${fresh.length} vs ${glyphs}`);
+  assert.ok(
+    fresh.every((id) => after.scene.nodes[id].primitive.type === 'path'),
+    'every letterform is a path node',
+  );
+  assert.ok(
+    fresh.every((id) => after.scene.nodes[id].visible && after.scene.nodes[id].primitive.d.includes('M')),
+    'and each one carries geometry it can be filled with',
+  );
+  const row = after.layers.flatMap((layer) => layer.children ?? []).length
+    ? after.layers.find((layer) => (layer.children ?? []).includes(fresh[0]))
+    : null;
+  assert.ok(row, 'the letterforms are children of a group in the layer tree');
+  assert.equal(row.children.filter((id) => fresh.includes(id)).length, fresh.length,
+    'and the group holds exactly the new letterforms');
+  // 3. One undo, and the document is back exactly as it was.
+  assert.equal(JSON.parse(oengine.undo()).status, 'ok');
+  const undone = snap();
+  assert.equal(undone.scene.nodes[text].visible, true, 'the type is back on screen');
+  assert.deepEqual(
+    Object.keys(undone.scene.nodes).sort(),
+    [...beforeIds].sort(),
+    'the letterforms are gone',
+  );
+  assert.equal(undone.scene.nodes[text].primitive.d, drawn, 'the run is byte for byte');
+  console.log('smoke[75/79]: RULE 3 — outlining is non-destructive, grouped, and one undo');
+}
+
+
+// ── Task 12.0: smart fills, regions and broken paths ───────────────────────
+//
+// Four rules driven through the REAL engine with nothing but JSON: build an
+// arrangement, read its regions, fill one, move a boundary, break a path at its
+// crossings. Every assertion is about what a designer would see — which faces
+// exist, where the fill sits in the draw order, whether the geometry followed
+// the shape, and whether the pieces add back up to what they came from.
+
+// 76. **The Region Graph** (RULE 1). Two overlapping circles make exactly three
+//     faces — A only, B only, A∩B — the crossing points are the engine's, and
+//     each circle's outline is partitioned by the spans between them. A probe
+//     point identifies the face it is in; empty space identifies nothing.
+{
+  const rengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(rengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(rengine.get_snapshot());
+  const circle = (cx, cy, r, name) => {
+    const id = crypto.randomUUID();
+    const created = send({
+      type: 'CreateNode',
+      id,
+      name,
+      kind: { Circle: { cx: { Literal: cx }, cy: { Literal: cy }, radius: { Literal: r } } },
+    });
+    assert.equal(created.status, 'ok', JSON.stringify(created));
+    return id;
+  };
+
+  const a = circle(200, 200, 100, 'A');
+  const b = circle(320, 200, 100, 'B');
+  const plan = JSON.parse(rengine.smart_fill_plan(JSON.stringify([a, b]), JSON.stringify([260, 200])));
+
+  assert.deepEqual(
+    plan.sources.map((source) => source.id),
+    [a, b],
+    'the boundaries are listed in the order they were named',
+  );
+  assert.equal(plan.regions.length, 3, `exactly three regions: ${JSON.stringify(plan.regions)}`);
+  const lens = plan.regions.find((region) => region.members.length === 2);
+  const onlyA = plan.regions.find((region) => region.members.join() === a);
+  const onlyB = plan.regions.find((region) => region.members.join() === b);
+  assert.ok(lens && onlyA && onlyB, 'A only, B only and A∩B, one each');
+  // The lens is the smallest face, and the probe point is inside it.
+  assert.equal(plan.hit, lens.index, 'the probe point identifies the lens');
+  assert.ok(onlyA.area > lens.area && onlyB.area > lens.area, 'the lens is the smallest face');
+  // The circles are r=100 with centres 120 apart: the lens area has a closed
+  // form, and the engine's own number must match it — 2r²cos⁻¹(d/2r) − (d/2)√(4r²−d²).
+  const analytic = 2 * 1e4 * Math.acos(0.6) - 60 * Math.sqrt(4e4 - 1.44e4);
+  assert.ok(
+    Math.abs(lens.area - analytic) / analytic < 0.02,
+    `lens area ${lens.area} ≈ ${analytic}`,
+  );
+  assert.ok(lens.path.includes('M') && lens.path.includes('Z'), 'a region is a clean closed path');
+
+  // The crossing points themselves: two circles crossing at x = 260, y = 200 ± 80.
+  // A crossing is where the two *outlines the renderer draws* meet, and those
+  // outlines are flattened polygons whose chords cut the corner by up to the
+  // flattening tolerance — so the honest check is that each crossing lies on
+  // both circles, near the analytic point, not that it lands on it exactly.
+  assert.equal(plan.crossings.length, 2, JSON.stringify(plan.crossings));
+  for (const [x, y] of plan.crossings) {
+    assert.ok(Math.abs(Math.hypot(x - 200, y - 200) - 100) < 0.25, `crossing lies on A: ${x},${y}`);
+    assert.ok(Math.abs(Math.hypot(x - 320, y - 200) - 100) < 0.25, `crossing lies on B: ${x},${y}`);
+    assert.ok(Math.abs(x - 260) < 0.5, `crossing on the midline: ${x}`);
+    assert.ok(Math.abs(Math.abs(y - 200) - 80) < 0.5, `crossing at ±80: ${y}`);
+  }
+  // Each outline is cut into the arcs between those crossings, and the arcs are
+  // the whole outline — the spans partition it.
+  for (const source of plan.sources) {
+    assert.equal(source.spans.length, 2, `two spans on ${source.name}`);
+    const covered = source.spans.reduce((sum, span) => sum + span.length, 0);
+    assert.ok(Math.abs(covered - source.spans[0].total) < 1e-6, 'spans cover the outline exactly');
+    assert.ok(
+      source.spans[0].start.every((v, i) => Math.abs(v - source.spans[1].end[i]) < 1e-6),
+      'one span ends where the other begins',
+    );
+  }
+  // Empty space is in no face at all — not in the nearest one.
+  const outside = JSON.parse(rengine.smart_fill_plan(JSON.stringify([a, b]), JSON.stringify([10, 10])));
+  assert.equal(outside.hit, null, 'a point outside every path identifies no region');
+  console.log('smoke[76/79]: RULE 1 — two circles, three regions, spans and crossings from the engine');
+}
+
+// 77. **A Smart Fill is parametric** (RULE 2) and **ColorDrop makes one**
+//     (RULE 4). The drop creates a *node* pinned to the region — above the
+//     boundaries in the draw order, wearing the dropped colour — and moving a
+//     boundary re-reads the arrangement instead of replaying stored geometry.
+//     Move it far enough and the seed is in no face: the fill is empty and says
+//     so with a diagnostic of its own.
+{
+  const fengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(fengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(fengine.get_snapshot());
+  const circle = (cx, cy, r, name) => {
+    const id = crypto.randomUUID();
+    send({
+      type: 'CreateNode',
+      id,
+      name,
+      kind: { Circle: { cx: { Literal: cx }, cy: { Literal: cy }, radius: { Literal: r } } },
+    });
+    return id;
+  };
+
+  const a = circle(200, 200, 100, 'A');
+  const b = circle(320, 200, 100, 'B');
+  const fill = crypto.randomUUID();
+  const created = send({
+    type: 'CreateSmartFill',
+    id: fill,
+    boundaries: [a, b],
+    seed: [260, 200],
+    fill: { r: 232, g: 98, b: 44, a: 255 },
+    name: 'orange',
+  });
+  assert.equal(created.status, 'ok', JSON.stringify(created));
+
+  let scene = snap();
+  assert.equal(scene.operations[fill].kind, 'smart-fill', 'registered as a region operation');
+  assert.equal(scene.operations[fill].description, 'smart fill · 2 boundaries');
+  assert.deepEqual(scene.operations[fill].inputs, [a, b], 'the boundaries it reads, not itself');
+  const node = scene.scene.nodes[fill];
+  assert.ok(node, 'the fill is a real scene node');
+  assert.equal(node.name, 'orange');
+  assert.equal(node.primitive.type, 'path');
+  assert.ok(node.primitive.d.includes('M'), 'with geometry');
+  // **RULE 4's paint**: the dropped colour is the fill's own appearance stack.
+  assert.equal(node.style.appearances[0].kind, 'fill');
+  assert.equal(node.style.appearances[0].paint.color, '#e8622c');
+  assert.equal(node.style.fill, '#e8622c', 'and it is the fill the renderer uses');
+  // **Above the boundaries** (RULE 4): an operation's result draws after the
+  // shapes it reads, which is what "sitting above the boundary paths" means in
+  // a painter's-algorithm draw order.
+  const order = scene.scene.z_order;
+  assert.ok(
+    order.indexOf(fill) > order.indexOf(a) && order.indexOf(fill) > order.indexOf(b),
+    `the fill draws above its boundaries: ${JSON.stringify(order)}`,
+  );
+
+  // Parametric: move B and the *region* moves with it — the fill's geometry is
+  // recomputed, not translated.
+  const before = node.primitive.d;
+  const moved = send({
+    type: 'SetParameter',
+    node_id: b,
+    property: 'cx',
+    value: { Float: { Literal: 340 } },
+  });
+  assert.equal(moved.status, 'ok');
+  const dirty = moved.events.filter((e) => e.type === 'Dirty').flatMap((e) => e.ids);
+  assert.ok(dirty.includes(fill), `the dependent fill must be dirty: ${JSON.stringify(moved)}`);
+  const afterMove = snap().scene.nodes[fill].primitive.d;
+  assert.notEqual(afterMove, before, 'the fill re-evaluated');
+  // The new lens is *smaller*: the circles are further apart, so a translation
+  // would have been wrong — this is the region, re-derived.
+  const planNow = JSON.parse(
+    fengine.smart_fill_plan(JSON.stringify([a, b]), JSON.stringify([270, 200])),
+  );
+  const lensNow = planNow.regions.find((region) => region.members.length === 2);
+  assert.ok(lensNow && lensNow.area < 8946, `narrower lens after the move: ${lensNow.area}`);
+
+  // Pull them far apart: the *lens* is gone, but the seed is still inside A, and
+  // the fill keeps to its seed — it is A's face now, re-derived again, rather
+  // than a stale copy of the old lens.
+  send({ type: 'SetParameter', node_id: b, property: 'cx', value: { Float: { Literal: 900 } } });
+  scene = snap();
+  const followed = scene.scene.nodes[fill];
+  assert.ok(followed, 'the seed is still enclosed — the fill follows the seed');
+  assert.notEqual(followed.primitive.d, afterMove, 'and it is not the old lens');
+  const planApart = JSON.parse(
+    fengine.smart_fill_plan(JSON.stringify([a, b]), JSON.stringify([260, 200])),
+  );
+  assert.equal(
+    planApart.regions[planApart.hit].members.join(),
+    a,
+    'the seed resolves to A alone in the new arrangement',
+  );
+  // Now take *both* boundaries off the seed: no face encloses it any more, and
+  // the fill is *empty and says so*.
+  send({ type: 'SetParameter', node_id: a, property: 'cx', value: { Float: { Literal: -1000 } } });
+  scene = snap();
+  assert.equal(scene.scene.nodes[fill], undefined, 'with no region, there is no fill');
+  const note = scene.diagnostics.find((d) => d.code === 'smart-fill-empty');
+  assert.ok(note, `a diagnostic names the missing region: ${JSON.stringify(scene.diagnostics)}`);
+  assert.equal(note.severity, 'warning');
+  console.log('smoke[77/79]: RULE 2 + RULE 4 — a drop makes a parametric fill above its boundaries');
+}
+
+// 78. **Break Path at Intersections** (RULE 3). A path crossed by another shape
+//     has spans; breaking at them mints closed `Path` nodes, hides the source
+//     (non-destructively), keeps the areas adding up — and one undo puts the
+//     document back exactly.
+{
+  const pengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(pengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(pengine.get_snapshot());
+
+  // A square path, and a rectangle overlapping its right half.
+  const square = crypto.randomUUID();
+  const line = (x, y) => ({ Line: { to: { Literal: { x, y } } } });
+  send({
+    type: 'CreateNode',
+    id: square,
+    name: 'square',
+    kind: {
+      Path: {
+        start: { Literal: { x: 0, y: 0 } },
+        segments: [line(200, 0), line(200, 200), line(0, 200), 'Close'],
+      },
+    },
+  });
+  const bar = crypto.randomUUID();
+  send({
+    type: 'CreateNode',
+    id: bar,
+    name: 'bar',
+    kind: {
+      Rectangle: {
+        x: { Literal: 100 },
+        y: { Literal: 50 },
+        width: { Literal: 200 },
+        height: { Literal: 100 },
+        corner_radius: { Literal: 0 },
+      },
+    },
+  });
+
+  const before = snap();
+  const drawn = before.scene.nodes[square].primitive.d;
+  const beforeIds = new Set(Object.keys(before.scene.nodes));
+  // The bar is a *participant*: a path's spans are its arcs between crossings
+  // with the other paths in the graph, so both are named.
+  const plan = JSON.parse(pengine.smart_fill_plan(JSON.stringify([square, bar]), 'null'));
+  const source = plan.sources.find((s) => s.id === square);
+  assert.ok(source, 'the square is a boundary');
+  assert.equal(source.spans.length, 2, 'the bar crosses it twice, so it has two spans');
+  assert.ok(Math.abs(source.area - 40000) < 1e-6, `the square's own area: ${source.area}`);
+  const all = source.spans.map((span) => [span.from, span.to]);
+
+  // Every span at once: the path becomes its arcs between crossings.
+  const reply = JSON.parse(pengine.break_path(square, JSON.stringify(all)));
+  assert.equal(reply.status, 'ok', JSON.stringify(reply));
+  assert.ok(reply.created, 'the reply names the piece it made');
+  const after = snap();
+  assert.equal(after.scene.nodes[square].visible, false, 'the source is hidden, not deleted');
+  const fresh = Object.keys(after.scene.nodes).filter((id) => !beforeIds.has(id));
+  assert.equal(fresh.length, 2, `two pieces from two cuts: ${fresh.length}`);
+  for (const id of fresh) {
+    const piece = after.scene.nodes[id];
+    assert.equal(piece.primitive.type, 'path', 'a piece is an ordinary path node');
+    assert.ok(piece.visible && piece.primitive.d.includes('M'), 'with real geometry');
+    assert.ok(piece.primitive.d.includes('Z'), `and closed: ${piece.primitive.d}`);
+    assert.equal(piece.style.fill, before.scene.nodes[square].style.fill, 'wearing the source paint');
+  }
+  // **No gaps and no overlap**: the pieces' areas add back up to the source's.
+  const piecesPlan = JSON.parse(pengine.smart_fill_plan(JSON.stringify(fresh), 'null'));
+  const total = piecesPlan.sources.reduce((sum, s) => sum + s.area, 0);
+  assert.ok(
+    Math.abs(total - source.area) < 1e-6,
+    `the pieces tile the square: ${total} vs ${source.area}`,
+  );
+  // One undo, and the document is exactly what it was.
+  assert.equal(JSON.parse(pengine.undo()).status, 'ok');
+  const undone = snap();
+  assert.equal(undone.scene.nodes[square].visible, true, 'the source is back on screen');
+  assert.deepEqual(Object.keys(undone.scene.nodes).sort(), [...beforeIds].sort(), 'pieces gone');
+  assert.equal(undone.scene.nodes[square].primitive.d, drawn, 'byte for byte');
+  console.log('smoke[78/79]: RULE 3 — breaking at the crossings yields closed pieces that tile');
+}
+
+// 79. **Breaking one span**, and the empty case. A single span splits the path
+//     at its two crossings into the span itself and the rest of the ring — the
+//     "user selects a span and breaks it" gesture. A path nothing crosses has no
+//     span at all, so the engine refuses the break rather than inventing one.
+{
+  const sengine = new glue.VectraEngine();
+  const send = (cmd) => JSON.parse(sengine.dispatch_command(JSON.stringify(cmd)));
+  const snap = () => JSON.parse(sengine.get_snapshot());
+  const line = (x, y) => ({ Line: { to: { Literal: { x, y } } } });
+
+  const square = crypto.randomUUID();
+  send({
+    type: 'CreateNode',
+    id: square,
+    name: 'square',
+    kind: {
+      Path: {
+        start: { Literal: { x: 0, y: 0 } },
+        segments: [line(200, 0), line(200, 200), line(0, 200), 'Close'],
+      },
+    },
+  });
+  const bar = crypto.randomUUID();
+  send({
+    type: 'CreateNode',
+    id: bar,
+    name: 'bar',
+    kind: {
+      Rectangle: {
+        x: { Literal: 100 },
+        y: { Literal: 50 },
+        width: { Literal: 200 },
+        height: { Literal: 100 },
+        corner_radius: { Literal: 0 },
+      },
+    },
+  });
+
+  const plan = JSON.parse(sengine.smart_fill_plan(JSON.stringify([square, bar]), 'null'));
+  const span = plan.sources.find((s) => s.id === square).spans[0];
+  const reply = JSON.parse(sengine.break_path(square, JSON.stringify([[span.from, span.to]])));
+  assert.equal(reply.status, 'ok', JSON.stringify(reply));
+  const split = snap();
+  const fresh = Object.keys(split.scene.nodes).filter((id) => id !== square && id !== bar);
+  assert.equal(fresh.length, 2, 'a span splits the path into the span and the rest');
+  const areas = JSON.parse(sengine.smart_fill_plan(JSON.stringify(fresh), 'null')).sources.map(
+    (s) => s.area,
+  );
+  assert.ok(
+    Math.abs(areas.reduce((x, y) => x + y, 0) - 40000) < 1e-6,
+    `the two arcs are the whole square: ${JSON.stringify(areas)}`,
+  );
+
+  // **A path nothing crosses has no span at all** — the two cuts are the only
+  // reason to cut. The lone circle shares a graph with the crossed square, so
+  // the zero is about the circle and not about an empty question.
+  const lone = crypto.randomUUID();
+  send({
+    type: 'CreateNode',
+    id: lone,
+    name: 'lone',
+    kind: {
+      Circle: {
+        cx: { Literal: 600 },
+        cy: { Literal: 600 },
+        radius: { Literal: 50 },
+      },
+    },
+  });
+  const whole = JSON.parse(
+    sengine.smart_fill_plan(JSON.stringify([square, bar, lone]), 'null'),
+  );
+  const spansOf = (id) => whole.sources.find((s) => s.id === id)?.spans.length ?? -1;
+  assert.equal(spansOf(lone), 0, 'nothing crosses the lone circle');
+  assert.equal(spansOf(square), 2, 'and in the same graph the square keeps its two');
+
+  // A break at no spans is refused: "nothing to break" is an answer, not an
+  // invented cut.
+  const refused = JSON.parse(sengine.break_path(lone, '[]'));
+  assert.equal(refused.status, 'error', JSON.stringify(refused));
+  console.log('smoke[79/79]: RULE 3 — one span, two arcs; nothing to break is refused');
 }
 
 console.log(
-  'SMOKE PASS: wasm → create → snapshot → bind → expr → undo → typed errors → graph → incremental → patch ≡ rebuild → constraints → drag triad → operations → canvas frames → pointer hits → motion → springs → idle stop → tracks → procedural graph → semantic SVG → parametric React → live-scene export → AI summary → AI commands → self-correction → document serialization (.vectra save path) → pen gestures → brush fitting → Quick Shape snap → direct selection → overlay camera → workspace seed → eye/lock flags → stacked appearances + blends + gradients → artboard jump/frame/export → layer reorder → pan/zoom navigation → nested groups → artboard box editing → arbitrary-depth trees → grouping as one undo → cycle refusal → group blocks in the z-order → cross-layer drops → cross-layer grouping undone → runs, not rows → one placement verb → smart components → make magic → icon studio → one-sentence answers → alpha lock → clipping masks → colordrop fill',
+  'SMOKE PASS: wasm → create → snapshot → bind → expr → undo → typed errors → graph → incremental → patch ≡ rebuild → constraints → drag triad → operations → canvas frames → pointer hits → motion → springs → idle stop → tracks → procedural graph → semantic SVG → parametric React → live-scene export → AI summary → AI commands → self-correction → document serialization (.vectra save path) → pen gestures → brush fitting → Quick Shape snap → direct selection → overlay camera → workspace seed → eye/lock flags → stacked appearances + blends + gradients → artboard jump/frame/export → layer reorder → pan/zoom navigation → nested groups → artboard box editing → arbitrary-depth trees → grouping as one undo → cycle refusal → group blocks in the z-order → cross-layer drops → cross-layer grouping undone → runs, not rows → one placement verb → smart components → make magic → icon studio → one-sentence answers → alpha lock → clipping masks → colordrop fill → parametric text → text on a path → outline to paths → region graph (3 faces) → a parametric smart fill from a drop → break at the crossings',
 );

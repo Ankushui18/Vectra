@@ -7,7 +7,10 @@
 use thiserror::Error;
 use vectra_core::{NodeId, OperationId};
 
-#[derive(Debug, Error, PartialEq, Eq)]
+// `Eq` is deliberately absent: `SmartFillEmpty` carries the seed point a region
+// failed to surround, and `f64` is `PartialEq` but not `Eq` — stating equality
+// as partial is the honest description of an error that reports coordinates.
+#[derive(Debug, Error, PartialEq)]
 pub enum OperationError {
     /// The operation id is not in the registry (removed between the pass being
     /// scheduled and running).
@@ -47,4 +50,23 @@ pub enum OperationError {
     /// registry was mutated out of band.
     #[error("operation takes {expected} input(s), got {got}")]
     Arity { expected: usize, got: usize },
+
+    /// **A Smart Fill's seed is in no face** (Task 12.0 RULE 2): the boundaries
+    /// no longer enclose the point the fill was dropped at — they were pulled
+    /// apart, or the fill reads shapes that no longer overlap.
+    ///
+    /// A warning, not a trap: the fill contributes no geometry this pass, the
+    /// designer is told the boundaries moved away from it, and moving one back
+    /// restores the fill exactly (nothing about the record was rewritten).
+    #[error("smart fill {operation}: no region contains its seed ({x}, {y})")]
+    SmartFillEmpty {
+        operation: OperationId,
+        x: f64,
+        y: f64,
+    },
+
+    /// A Smart Fill whose boundaries all enclose area *none*, or whose boundary
+    /// list is empty (a hand-edited document).
+    #[error("smart fill {operation} has no boundary that encloses area")]
+    NoBoundaries { operation: OperationId },
 }

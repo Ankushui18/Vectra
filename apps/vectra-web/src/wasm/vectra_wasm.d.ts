@@ -220,6 +220,31 @@ export class VectraEngine {
      */
     bind_spring(node_id: string, property: string, target: number, stiffness: number, damping: number): string;
     /**
+     * **Break a path at the intersections of its outline** (Task 12.0 RULE 3).
+     *
+     * `spans_json` is `[[from, to], …]` — arc lengths along the node's outline,
+     * exactly the numbers [`Self::smart_fill_plan`] reported, so the UI echoes
+     * what the engine measured instead of computing a cut of its own.
+     *
+     * **The spans are read as cut positions, and that is the whole algorithm.**
+     * A span's two ends *are* two crossings; collect the ends of every span the
+     * caller named, walk the ring between consecutive cuts, and each arc
+     * between them is one piece. Nothing about the count of pieces is special-
+     * cased, and both gestures fall out of the same rule:
+     *
+     * * one span → two cuts → **two** complementary arcs (the span, and the rest
+     *   of the ring) — "break this span";
+     * * every span of a path crossed twice → two distinct cuts → **two** arcs
+     *   that tile the ring — "Break Path at Intersections".
+     *
+     * A ring nothing crosses is not broken: it is carried over as a piece of its
+     * own, so every point of the outline ends up in exactly one piece. The
+     * pieces become ordinary closed `Path` nodes wearing the source's paint, and
+     * the source is hidden rather than deleted — one undo away, and the region
+     * graph that suggested the cut is still there to re-read.
+     */
+    break_path(node_id: string, spans_json: string): string;
+    /**
      * The Smart Component inspector's whole world: what the selection is, and
      * every prop it exposes (Task 10.6 RULE 1, RULE 4).
      */
@@ -457,6 +482,11 @@ export class VectraEngine {
      */
     export_to_svg(): string;
     /**
+     * The families the host's font library can resolve, as a JSON array —
+     * the Text panel's picker. Always non-empty: the bundled face is in it.
+     */
+    font_families(): string;
+    /**
      * Rebuild the whole scene from scratch (the UI's "re-evaluate everything"
      * control). Demonstrably equal to the incremental cache — the app-level
      * witness of `patch ≡ rebuild`.
@@ -494,6 +524,21 @@ export class VectraEngine {
      * Initialize a fresh engine.
      */
     constructor();
+    /**
+     * **Outline a text node to paths** (Task 11.0 RULE 3): the non-destructive
+     * conversion from type to letterforms.
+     *
+     * Shaping lives in `vectra-geometry`, and `Command::OutlineText` carries a
+     * *plan* rather than a font, so the boundary is where the two meet: it
+     * lays the run out, asks the geometry crate for one closed plan per
+     * letterform, mints the group and letterform ids, and dispatches the command
+     * as **one history entry**. Core never learns what a glyph is; the sketch
+     * from the font never leaves this call.
+     *
+     * The original text node is hidden, never deleted — undo restores it
+     * exactly, and its string and parameters are still there to come back to.
+     */
+    outline_text(node_id: string, name?: string | null): string;
     /**
      * The pointer left the canvas: nothing is hovered any more.
      *
@@ -538,6 +583,14 @@ export class VectraEngine {
      * Redo one step. Returns a [`CommandResponse`] JSON string.
      */
     redo(): string;
+    /**
+     * Register a face for a family name (Task 11.0 RULE 1), as raw bytes.
+     *
+     * Registration is *validating*: bytes that do not parse as a font are
+     * refused and nothing changes, so a bad upload can never become a text node
+     * that silently draws nothing.
+     */
+    register_font(family: string, bytes: Uint8Array): string;
     /**
      * Remove a track by id. Undoable; a slot still bound to it fails to resolve
      * until the track returns, and that failure is visible in the event log
@@ -610,6 +663,30 @@ export class VectraEngine {
      */
     set_time(t: number): string;
     /**
+     * **The Smart Fill plan** (Task 12.0 RULE 1): the region graph of a set of
+     * paths, as JSON — see [`RegionPlanWire`].
+     *
+     * This is a *query*, not a command: it mutates nothing, and every consumer
+     * that needs to know which faces a set of paths makes asks here rather than
+     * computing a region of its own.
+     *
+     * `ids_json` names the boundaries. **An empty list means RULE 1's own
+     * sentence** — *"all selected or overlapping paths in the active layer"* —
+     * so the callers that have no opinion (the tool, the drop) pass `[]` and get
+     * the rule, while a panel or a test can still name a set. Either way a
+     * **group expands** to the shapes it holds: a group is a selection, not a
+     * boundary, and point-in-region against a group has no meaning of its own.
+     * An id with no evaluated geometry contributes no face.
+     *
+     * `point_json` is `null` — or the two numbers of a **drop point** (RULE 4's
+     * seed). With a point, `hit` is the face that contains it, or `null` when it
+     * falls in no face at all; the test is `RegionGraph::face_at`, which is the
+     * same smallest-face-wins answer a fill's own evaluation uses, so the
+     * highlight the designer sees and the region the fill adopts are one
+     * function, not two that agree today.
+     */
+    smart_fill_plan(ids_json: string, point_json: string): string;
+    /**
      * The structural macros the command bar offers as one-tap chips (RULE 2):
      * the prompt text, plus what it will do, in the designer's words.
      */
@@ -653,6 +730,7 @@ export interface InitOutput {
     readonly vectraengine_ai_prompt: (a: number) => [number, number];
     readonly vectraengine_bind_hover_spring: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly vectraengine_bind_spring: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly vectraengine_break_path: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_component_view: (a: number) => [number, number];
     readonly vectraengine_create_component: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_dependencies: (a: number) => [number, number];
@@ -675,6 +753,7 @@ export interface InitOutput {
     readonly vectraengine_export_current_artboard: (a: number) => [number, number];
     readonly vectraengine_export_to_react: (a: number) => [number, number];
     readonly vectraengine_export_to_svg: (a: number) => [number, number];
+    readonly vectraengine_font_families: (a: number) => [number, number];
     readonly vectraengine_force_full_evaluation: (a: number) => [number, number];
     readonly vectraengine_get_snapshot: (a: number) => [number, number];
     readonly vectraengine_icon_set: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -682,11 +761,13 @@ export interface InitOutput {
     readonly vectraengine_is_animating: (a: number) => number;
     readonly vectraengine_motion_json: (a: number) => [number, number];
     readonly vectraengine_new: () => number;
+    readonly vectraengine_outline_text: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_pointer_leave: (a: number) => [number, number];
     readonly vectraengine_pointer_move: (a: number, b: number, c: number, d: number) => [number, number];
     readonly vectraengine_procedural_json: (a: number) => [number, number];
     readonly vectraengine_procedural_kinds: (a: number) => [number, number];
     readonly vectraengine_redo: (a: number) => [number, number];
+    readonly vectraengine_register_font: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_remove_motion_track: (a: number, b: number, c: number) => [number, number];
     readonly vectraengine_render_frame: (a: number, b: number) => [number, number];
     readonly vectraengine_set_component_prop: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
@@ -694,6 +775,7 @@ export interface InitOutput {
     readonly vectraengine_set_selection: (a: number, b: number, c: number) => [number, number];
     readonly vectraengine_set_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly vectraengine_set_time: (a: number, b: number) => [number, number];
+    readonly vectraengine_smart_fill_plan: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_structural_macros: (a: number) => [number, number];
     readonly vectraengine_undo: (a: number) => [number, number];
     readonly wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;

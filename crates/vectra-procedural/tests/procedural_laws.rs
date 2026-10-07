@@ -706,6 +706,8 @@ fn law_a_procedural_result_survives_a_neighbouring_operation() {
             op: vectra_core::BooleanOp::Union,
         },
         inputs: vec![a, b],
+        style: None,
+        name: None,
     })
     .expect("union");
     assert!(

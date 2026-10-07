@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 818fef69bc0a08fb1a9ff8529362b6c10806acc576bf6e37d2add024312f915b # shrinks to word = "B", size = 1.0, factor = 0.05, (x, y) = (-1239.6752254240603, 0.0)
+cc 525feb2b05358b092ed382f211ba48d35324b6e838641a8ccdf4b316f8d94222 # shrinks to word = "u", size = 87.12903850665215, (x, y) = (0.0, 0.0)
+cc ff8fc46792f816fa3a7244ee18d7392e0cda0ff59d182b2889f23b475fb63b9e # shrinks to word = "fi", size = 1.0
+cc a5ba7ecde7032ff662bdfd3b9d3c9f1209c1e0a11eaed2d518df8f90341ab504 # shrinks to word = "FCAa", size = 62.83889259719818, r = 200.0, delta = 17.31774008570148
+cc ad7355ea0d9ce65f64eeaec4f54378989c77ba40a5920bc35be98b075ce87704 # shrinks to word = "AcdV", size = 45.77448942244777, r = 440.51733925894706, delta = 3.8451952808781216
+cc 8e86e83d38d9a9180b37b79098d5fdb2f053c4cd3c5c5c5afd9e751747d7f6e0 # shrinks to word = "I", size = 4.0, factor = 1.05, (x, y) = (0.0, 0.0)
+cc 2b081392cddb0e01991e81fd1ad237bb3d43d96d0c8e51154a7145047d4a01e1 # shrinks to word = "daAkuaKDA", size = 63.7614183838995, r = 50.0, factor = 1.2

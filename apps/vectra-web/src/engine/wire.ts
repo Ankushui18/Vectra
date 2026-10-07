@@ -90,6 +90,22 @@ export type NodeKindWire =
       };
     }
   | { Path: { start: ParameterPoint; segments: PathSegmentWire[] } }
+  /** **A parametric text node** (Task 11.0 RULE 1). `font_size`,
+   *  `letter_spacing` and `line_height` are parameters like any other slot;
+   *  `on_path` carries the RULE 2 binding (`offset` is a parameter too). */
+  | {
+      Text: {
+        text: string;
+        font_family: string;
+        font_size: ParameterFloat;
+        letter_spacing: ParameterFloat;
+        line_height: ParameterFloat;
+        alignment: TextAlignmentWire;
+        x: ParameterFloat;
+        y: ParameterFloat;
+        on_path?: { node: string; offset: ParameterFloat } | null;
+      };
+    }
   | { Group: { children: string[] } };
 
 // ── Commands (Document → mutation) ─────────────────────────────────────
@@ -125,7 +141,27 @@ export type CommandWire =
   // ── Task 4.0: non-destructive operations ────────────────────────────
   // The sources stay in the document; the operation is a virtual node that
   // reads their evaluated geometry (RULE 1).
-  | { type: 'ApplyOperation'; id: string; kind: OperationKindWire; inputs: string[] }
+  | {
+      type: 'ApplyOperation';
+      id: string;
+      kind: OperationKindWire;
+      inputs: string[];
+      /** Task 12.0: the paint a *virtual* node wears. `RemoveOperation`'s
+       *  inverse restores the whole record, so the pair travels together. */
+      style?: unknown;
+      name?: string;
+    }
+  | {
+      type: 'CreateSmartFill';
+      id: string;
+      /** The `NodeId`s of the boundary paths, in region-graph order. */
+      boundaries: string[];
+      /** The drop point, in document units: the fill's identity. */
+      seed: [number, number];
+      /** The dropped colour, or absent for the engine's default stack. */
+      fill?: ColorWire;
+      name?: string;
+    }
   | { type: 'RemoveOperation'; id: string }
   | { type: 'SetOperationEnabled'; id: string; enabled: boolean }
   // ── Task 6.0: motion ───────────────────────────────────────────────
@@ -160,6 +196,35 @@ export type CommandWire =
   | { type: 'SetAppearances'; node_id: string; appearances: AppearanceLayerWire[] }
   | { type: 'SetNodeVisible'; id: string; visible: boolean }
   | { type: 'SetNodeLocked'; id: string; locked: boolean }
+  // ── Task 11.0: parametric typography ────────────────────────────────
+  //
+  // Every number below is a `Parameter<f64>` on the wire (`font_size`,
+  // `letter_spacing`, `line_height`, `path_offset`), so the same
+  // `SetParameter` writes that drive a rectangle drive type — a `$variable`
+  // or an `ƒexpression` bound to `font_size` re-lays the run out on the next
+  // settle with no text-specific plumbing at all. The three commands here are
+  // the parts a parameter *cannot* express: a string, a family name and an
+  // alignment tag.
+  /** Rewrite a text node's string. */
+  | { type: 'SetText'; node_id: string; text: string }
+  /** Choose a font family; an unknown one is diagnosed, not refused. */
+  | { type: 'SetFontFamily'; node_id: string; family: string }
+  /** `left` | `center` | `right` (the engine's `TextAlign` tag). */
+  | { type: 'SetTextAlignment'; node_id: string; alignment: TextAlignmentWire }
+  /** **Bind a run to a path** (RULE 2): the text follows the target's
+   *  geometry, and `offset` (a parameter, hence parametric) slides it. */
+  | { type: 'BindTextToPath'; node_id: string; path: string; offset: ParameterFloat }
+  | { type: 'UnbindTextFromPath'; node_id: string }
+  /** **Outline to paths** (RULE 3): the boundary fills `paths` from the
+   *  shaped run — one closed plan per letterform — and core does the rest
+   *  non-destructively (new nodes, source hidden, one undo entry). */
+  | {
+      type: 'OutlineText';
+      node_id: string;
+      group_id: string;
+      name?: string;
+      paths: OutlinePathWire[];
+    }
   /** **Copy a node** — the engine's one copy primitive, which Task 10.7's
    *  Copy/Paste gesture (RULE 1) is built on. The new id is the caller's. */
   | { type: 'DuplicateNode'; id: string; source: string; name?: string; index?: number }
@@ -367,7 +432,11 @@ export type OperationKindWire =
   | { type: 'boolean'; op: BooleanOpWire }
   | { type: 'offset'; distance: ParameterFloat }
   | { type: 'fillet'; radius: ParameterFloat }
-  | { type: 'mirror'; axis: { axis: 'vertical' | 'horizontal'; at: ParameterFloat } };
+  | { type: 'mirror'; axis: { axis: 'vertical' | 'horizontal'; at: ParameterFloat } }
+  /** **Task 12.0 RULE 2**: the region is named by the paths around it and a
+   *  point inside it — never by a copy of the geometry. `boundaries` is the
+   *  parametric link: move one and the fill re-reads the arrangement. */
+  | { type: 'smart-fill'; boundaries: string[]; seed: [number, number] };
 
 /** One registered operation, as the Operations panel sees it. */
 export interface OperationWire {
@@ -510,7 +579,49 @@ export type SnapshotPrimitiveWire =
       start_angle: number;
       end_angle: number;
     }
-  | { type: 'path'; d: string };
+  | { type: 'path'; d: string }
+  /** **A laid-out text run** (Task 11.0). Geometry crosses as `d` — the glyph
+   *  contours, which is exactly what the renderer fills — plus the run's own
+   *  numbers, because a run's *box* is its advance box, not a bounding box
+   *  that can be re-derived from the shape. */
+  | {
+      type: 'text';
+      d: string;
+      glyphs: number;
+      width: number;
+      height: number;
+      lines: number;
+    };
+
+/** A line's alignment (Task 11.0), as the engine spells it. */
+export type TextAlignmentWire = 'left' | 'center' | 'right';
+
+/** One planned letterform of an `OutlineText` (RULE 3). The boundary mints
+ *  these from the shaped run; `segments` are ordinary path segments. */
+export interface OutlinePathWire {
+  id: string;
+  name: string;
+  start: ParameterPoint;
+  segments: PathSegmentWire[];
+}
+
+/** One text node's typography, resolved, plus how each number is driven —
+ *  the Text panel's row (the twin of `SnapshotPositionWire`). */
+export interface SnapshotTextWire {
+  text: string;
+  font_family: string;
+  alignment: TextAlignmentWire;
+  font_size: number;
+  font_size_source: string;
+  letter_spacing: number;
+  letter_spacing_source: string;
+  line_height: number;
+  line_height_source: string;
+  /** The bound path's node id when the run follows a curve (RULE 2). */
+  bound_to?: string | null;
+  offset?: number | null;
+  offset_source?: string | null;
+}
 
 /**
  * One resolved paint (Task 10.2 RULE 3): a solid colour, or a gradient with its
@@ -570,6 +681,52 @@ export interface SnapshotPositionWire {
   y_source: string;
 }
 
+/**
+ * **The Smart Fill plan** (Task 12.0): the region graph, as the engine reports
+ * it. One shape for the tool's highlight, ColorDrop's drop test and the panel's
+ * span list — all three are asking which faces a set of paths makes.
+ */
+export interface RegionPlanWire {
+  sources: PlanSourceWire[];
+  regions: PlanRegionWire[];
+  crossings: Array<[number, number]>;
+  /** The face the caller's probe point fell in, or `null`. */
+  hit: number | null;
+}
+
+export interface PlanSourceWire {
+  id: string;
+  name: string;
+  area: number;
+  /** `[min_x, min_y, max_x, max_y]`. */
+  bounds: [number, number, number, number];
+  /** The arcs between this path's intersection points; empty without crossings. */
+  spans: PlanSpanWire[];
+}
+
+export interface PlanSpanWire {
+  index: number;
+  /** Arc lengths along the source's **whole outline** — what `breakPath` takes. */
+  from: number;
+  to: number;
+  ring: number;
+  start: [number, number];
+  end: [number, number];
+  length: number;
+  total: number;
+}
+
+export interface PlanRegionWire {
+  index: number;
+  area: number;
+  holes: number;
+  /** The ids of the sources this face is inside — its signature. */
+  members: string[];
+  path: string;
+  /** Document-space rings (exterior first, then holes) for the overlay. */
+  rings: Array<Array<[number, number]>>;
+}
+
 export interface SnapshotNodeWire {
   id: string;
   name: string;
@@ -590,6 +747,8 @@ export interface SnapshotNodeWire {
   /** The layer that holds this node, and its name (`null` = unassigned). */
   layer?: string | null;
   layer_name?: string | null;
+  /** The Text panel's row (Task 11.0): present exactly on a text node. */
+  text?: SnapshotTextWire | null;
 }
 
 /** One row of the Layers Panel (Task 10.2 RULE 1). */
@@ -668,7 +827,13 @@ export interface SnapshotEvalWire {
 
 export interface SnapshotWire {
   status: 'ok';
-  scene: { nodes: Record<string, SnapshotNodeWire>; z_order: string[] };
+  scene: {
+    nodes: Record<string, SnapshotNodeWire>;
+    z_order: string[];
+    /** Families the host's font library can resolve (Task 11.0) — the Text
+     *  panel's font picker. Always non-empty: the bundled face is in it. */
+    fonts?: string[];
+  };
   variables: Record<string, number>;
   expressions: Record<string, string>;
   diagnostics: SnapshotDiagnosticWire[];

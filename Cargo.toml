@@ -48,6 +48,21 @@ chumsky = "0.10"
 cassowary = "0.3"
 nalgebra = "0.34"
 
+# text shaping / outlining (Task 11.0 RULEs 1 and 4)
+#
+# `rustybuzz` is HarfBuzz's shaping algorithm as a pure-Rust library (MIT), and
+# its `ttf-parser` dependency is what turns a shaped glyph id into outlines.
+# Both are pure Rust with no C toolchain and no `std` requirements, so the same
+# code shapes text on the host and in the browser's wasm sandbox — which is the
+# whole reason a text node can be authored anywhere and drawn anywhere.
+rustybuzz = { version = "0.20", default-features = false, features = ["std"] }
+ttf-parser = { version = "0.25", default-features = false, features = [
+    "opentype-layout",
+    "apple-layout",
+    "glyph-names",
+    "no-std-float",
+] }
+
 # geometry / operations (MES §5, §10)
 lyon = { version = "1", features = ["serialization"] }
 # Robust Rust-native 2D boolean math (Task 4.0 RULE 2). `geo::BooleanOps`

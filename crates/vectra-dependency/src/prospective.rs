@@ -117,6 +117,14 @@ pub fn prospective_edges(
         Command::ApplyOperation { .. }
         | Command::RemoveOperation { .. }
         | Command::SetOperationEnabled { .. } => ProspectiveEdges::empty(),
+        // Task 12.0 RULE 2: a Smart Fill reads its boundaries' *evaluated*
+        // geometry exactly as RULE 1's other region operations do, so it adds no
+        // slot-level edge: `Document::operations.affected_by(&dirty)` is what
+        // carries the dirt, and the region pass re-runs. RULE 3's break mints
+        // ordinary paths out of geometry the source already had, so its new nodes
+        // carry their own literal slots and nothing else — `CreateNode` arms
+        // above are the shape a piece *would* have if it were parametric.
+        Command::CreateSmartFill { .. } | Command::BreakPath { .. } => ProspectiveEdges::empty(),
         // Constraints are not dependency-graph edges in Phase 1 (Task 3.1 keeps
         // the Task 2.2 graph wire shape frozen): the solver's geometry writes go
         // through the ordinary `SetParameter` path, and the slots they pin are
@@ -212,6 +220,71 @@ pub fn prospective_edges(
                 adds: edges_from_node(&simulated),
             }
         }
+        // ── Task 11.0: text ───────────────────────────────────────────────
+        //
+        // The three *authored* text edits (the string, the family, the
+        // alignment) are not parameters: nothing can bind to a word, so they
+        // move no edge. (`SetText` is still a document edit — it re-lays the
+        // run out — but topology is about sources, and a string has none.)
+        Command::SetText { .. }
+        | Command::SetFontFamily { .. }
+        | Command::SetTextAlignment { .. } => ProspectiveEdges::empty(),
+        // Binding *is* a parameter edit: it adds the `path_offset` slot, which
+        // can read a variable or an expression, and unbinding removes it. Both
+        // are simulated on a clone exactly like `SetPath`, so the offset's
+        // sources become real edges the moment they exist — and withdraw with
+        // the slot, rather than lingering as a phantom dependency.
+        //
+        // The **geometry** link (the run follows the path) is deliberately not
+        // an edge: it is resolved during the run's own evaluation
+        // (`EvaluatedText` reads its source's evaluated geometry one level
+        // deep), so the graph's acyclicity guarantee does not have to reason
+        // about it. A cycle of geometry references is therefore *allowed* —
+        // and harmless: a run bound to a path that is bound to the run's
+        // outline draws whatever the last pass produced, and terminates.
+        Command::BindTextToPath {
+            node_id,
+            path,
+            offset,
+        } => {
+            let Ok(node) = doc.get_node(*node_id) else {
+                return ProspectiveEdges::empty();
+            };
+            let mut simulated = node.clone();
+            if let NodeKind::Text { on_path, .. } = &mut simulated.kind {
+                *on_path = Some(vectra_core::TextPathBinding {
+                    node: *path,
+                    offset: offset.clone(),
+                });
+            } else {
+                return ProspectiveEdges::empty();
+            }
+            ProspectiveEdges {
+                removes: graph.property_edges(*node_id),
+                adds: edges_from_node(&simulated),
+            }
+        }
+        Command::UnbindTextFromPath { node_id } => {
+            let Ok(node) = doc.get_node(*node_id) else {
+                return ProspectiveEdges::empty();
+            };
+            let mut simulated = node.clone();
+            if let NodeKind::Text { on_path, .. } = &mut simulated.kind {
+                *on_path = None;
+            } else {
+                return ProspectiveEdges::empty();
+            }
+            ProspectiveEdges {
+                removes: graph.property_edges(*node_id),
+                adds: edges_from_node(&simulated),
+            }
+        }
+        // Outlining adds nodes (whose points are literals, so they read
+        // nothing) and flips the source's `visible` flag: a visibility flip is
+        // not a parameter, so no existing edge is withdrawn either. The type it
+        // hides keeps every source it had — un-hiding it through undo must not
+        // need the graph rebuilt.
+        Command::OutlineText { .. } => ProspectiveEdges::empty(),
         // ── Task 10.6: Smart Components ────────────────────────────────────
         //
         // Creating a component *rebinds* its members' slots: a literal width

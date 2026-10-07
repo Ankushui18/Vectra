@@ -44,7 +44,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use snapshot::{
-    build_snapshot, SnapshotDiagnostic, SnapshotInputs, SnapshotPosition, SnapshotSolver,
+    build_snapshot, PlanRegionWire, PlanSourceWire, PlanSpanWire, RegionPlanWire,
+    SnapshotDiagnostic, SnapshotInputs, SnapshotPosition, SnapshotSolver, SnapshotText,
 };
 use std::collections::BTreeSet;
 use vectra_ai::exec::{self, CommandHost, ExecutionReport, Preview};
@@ -56,17 +57,18 @@ use vectra_constraints::{
 use vectra_core::summary::DocumentSummary;
 use vectra_core::{
     parse_node_id, Command, ConstraintTarget, Engine, EngineEvent, EvalMode, GeometryData,
-    MotionBinding, MotionTrack, NodeId, NodeOutputId, OperationId, ParamValue, Parameter,
-    ProceduralKind, Resolvable, VectraError,
+    MotionBinding, MotionTrack, NodeId, NodeKind, NodeOutputId, OperationId, ParamValue, Parameter,
+    Point2, ProceduralKind, Resolvable, VectraError,
 };
 use vectra_dependency::{gate_command, DependencyGraph, GraphExport, IncrementalScene};
+use vectra_geometry::EvaluatedPrimitive;
 
 use vectra_export::{
     compile_to_ir_resolved, export_artboards_svg, export_react, export_svg, ArtboardScope,
     ArtboardView, ExportBounds, ExportColor,
 };
 use vectra_expression::ExpressionEngine;
-use vectra_geometry::Diagnostic;
+use vectra_geometry::{Diagnostic, RegionGraph};
 use vectra_motion::{own_spring, reanchor, MotionEngine};
 use vectra_operations::{ClipState, OperationsEvaluator};
 use vectra_procedural::{ProceduralEngine, ProceduralEvaluation};
@@ -146,6 +148,12 @@ const MAX_PASS_ROUNDS: usize = 4;
 #[wasm_bindgen]
 pub struct VectraEngine {
     core: Engine,
+    /// The host's font faces (Task 11.0). Empty by default: every family
+    /// then resolves to the **bundled** face (`vectra_geometry::BUNDLED_FACE`),
+    /// so a fresh engine can set type with no host cooperation at all. A
+    /// host that ships faces registers them here and every text node in
+    /// every document sees them.
+    fonts: vectra_geometry::FontLibrary,
     expressions: ExpressionEngine,
     graph: DependencyGraph,
     scene: IncrementalScene,
@@ -544,6 +552,9 @@ impl VectraEngine {
             render_dirty: DirtyLedger::new(),
             draw: crate::draw::DrawTools::new(),
             clip: ClipState::new(),
+            // The bundled face answers every family until a host registers
+            // more, so text draws out of the box on any machine.
+            fonts: vectra_geometry::FontLibrary::bundled(),
         }
     }
 
@@ -639,6 +650,7 @@ impl VectraEngine {
     /// dirtied it.
     pub fn get_snapshot(&mut self) -> String {
         let positions = self.positions();
+        let texts = self.texts();
         {
             let Self {
                 core,
@@ -652,7 +664,8 @@ impl VectraEngine {
                 .evaluation_context()
                 .with_expression(expressions)
                 .with_motion(motion)
-                .with_procedural(procedural);
+                .with_procedural(procedural)
+                .with_fonts(&self.fonts);
             scene.refresh_if_cold(core.document(), &ctx);
         }
         let Self {
@@ -675,6 +688,16 @@ impl VectraEngine {
             diagnostics: &diagnostics,
             solver_diagnostics,
             positions: &positions,
+            texts: &texts,
+            // The picker's options, sorted by the projection: the library's own
+            // keys, never a hardcoded list — a document naming a family this
+            // host lacks still shows *its* family (the panel adds it).
+            fonts: {
+                let mut families = self.fonts.families();
+                families.sort();
+                families.dedup();
+                families
+            },
             published: &published,
             solver: SnapshotSolver::from_stats(
                 solver.stats(),
@@ -1190,6 +1213,382 @@ impl VectraEngine {
         self.dispatch_side_command(&command)
     }
 
+    /// **Outline a text node to paths** (Task 11.0 RULE 3): the non-destructive
+    /// conversion from type to letterforms.
+    ///
+    /// Shaping lives in `vectra-geometry`, and `Command::OutlineText` carries a
+    /// *plan* rather than a font, so the boundary is where the two meet: it
+    /// lays the run out, asks the geometry crate for one closed plan per
+    /// letterform, mints the group and letterform ids, and dispatches the command
+    /// as **one history entry**. Core never learns what a glyph is; the sketch
+    /// from the font never leaves this call.
+    ///
+    /// The original text node is hidden, never deleted — undo restores it
+    /// exactly, and its string and parameters are still there to come back to.
+    #[wasm_bindgen]
+    pub fn outline_text(&mut self, node_id: &str, name: Option<String>) -> String {
+        let Some(id) = parse_node_id(node_id) else {
+            return CommandResponse::err_json("invalid id".to_string());
+        };
+        // Outline what the user *sees*: if the scene is cold (a fresh document,
+        // a reload), lay it out first rather than refusing on a stale cache.
+        {
+            let Self {
+                core,
+                expressions,
+                scene,
+                motion,
+                procedural,
+                ..
+            } = self;
+            let ctx = core
+                .evaluation_context()
+                .with_expression(expressions)
+                .with_motion(motion)
+                .with_procedural(procedural)
+                .with_fonts(&self.fonts);
+            scene.refresh_if_cold(core.document(), &ctx);
+        }
+        let (text, node_name) = match self.core.document().nodes.get(&id) {
+            Some(node) => match &node.kind {
+                NodeKind::Text { text, .. } => (text.clone(), node.name.clone()),
+                other => {
+                    return CommandResponse::err_json(format!(
+                        "only a text node can be outlined; {} is a {}",
+                        node.name,
+                        other.tag()
+                    ))
+                }
+            },
+            None => {
+                return CommandResponse::err_json(format!("no node with id {id}"));
+            }
+        };
+        let Some(evaluated) = self.scene.scene().get(id) else {
+            return CommandResponse::err_json("the node has not been evaluated yet".to_string());
+        };
+        let EvaluatedPrimitive::Text(run) = &evaluated.primitive else {
+            return CommandResponse::err_json(
+                "the node has no laid-out run to outline".to_string(),
+            );
+        };
+        if run.glyphs.is_empty() {
+            return CommandResponse::err_json(
+                "there is nothing to outline: the run is empty".to_string(),
+            );
+        }
+        let plans = vectra_geometry::outline_plans(run, &text);
+        if plans.is_empty() {
+            return CommandResponse::err_json(
+                "there is nothing to outline: the run produced no contours".to_string(),
+            );
+        }
+        let paths: Vec<vectra_core::OutlinePath> = plans
+            .into_iter()
+            .map(|plan| vectra_core::OutlinePath {
+                id: vectra_core::new_node_id(),
+                name: plan.name,
+                start: Parameter::Literal(plan.start),
+                segments: plan.segments,
+            })
+            .collect();
+        let command = Command::OutlineText {
+            node_id: id,
+            group_id: vectra_core::new_node_id(),
+            // Default the group's name to the type's own, so the layers panel
+            // reads "Headline" rather than "Outlined text" for a node the
+            // designer already named.
+            name: Some(name.unwrap_or(node_name)),
+            paths,
+        };
+        self.dispatch_side_command(&command)
+    }
+
+    /// **The Smart Fill plan** (Task 12.0 RULE 1): the region graph of a set of
+    /// paths, as JSON — see [`RegionPlanWire`].
+    ///
+    /// This is a *query*, not a command: it mutates nothing, and every consumer
+    /// that needs to know which faces a set of paths makes asks here rather than
+    /// computing a region of its own.
+    ///
+    /// `ids_json` names the boundaries. **An empty list means RULE 1's own
+    /// sentence** — *"all selected or overlapping paths in the active layer"* —
+    /// so the callers that have no opinion (the tool, the drop) pass `[]` and get
+    /// the rule, while a panel or a test can still name a set. Either way a
+    /// **group expands** to the shapes it holds: a group is a selection, not a
+    /// boundary, and point-in-region against a group has no meaning of its own.
+    /// An id with no evaluated geometry contributes no face.
+    ///
+    /// `point_json` is `null` — or the two numbers of a **drop point** (RULE 4's
+    /// seed). With a point, `hit` is the face that contains it, or `null` when it
+    /// falls in no face at all; the test is `RegionGraph::face_at`, which is the
+    /// same smallest-face-wins answer a fill's own evaluation uses, so the
+    /// highlight the designer sees and the region the fill adopts are one
+    /// function, not two that agree today.
+    #[wasm_bindgen]
+    pub fn smart_fill_plan(&mut self, ids_json: &str, point_json: &str) -> String {
+        let requested: Vec<String> = match serde_json::from_str(ids_json) {
+            Ok(ids) => ids,
+            Err(error) => return CommandResponse::err_json(format!("invalid id list: {error}")),
+        };
+        let point: Option<(f64, f64)> = match point_json.trim() {
+            "" | "null" | "undefined" => None,
+            text => match serde_json::from_str::<[f64; 2]>(text) {
+                Ok([x, y]) => Some((x, y)),
+                Err(error) => return CommandResponse::err_json(format!("invalid point: {error}")),
+            },
+        };
+        // An empty request is RULE 1's default: what the designer is working on.
+        let context: Vec<NodeId> = if requested.is_empty() {
+            self.editing_context()
+        } else {
+            Vec::new()
+        };
+        let mut ids: Vec<NodeId> = Vec::new();
+        for id in context {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        for text in &requested {
+            let Some(id) = vectra_core::parse_node_id(text) else {
+                continue;
+            };
+            // A group stands for its contents — it has no outline of its own —
+            // and anything else is the shape it names. (Naming a plain shape
+            // therefore contributes that shape; only a nested *group* expands
+            // on its own member's pass.)
+            let named: Vec<NodeId> = if Self::is_group(self.core.document(), id) {
+                self.core.document().node_block(id)
+            } else {
+                vec![id]
+            };
+            for member in named {
+                if Self::is_group(self.core.document(), member) {
+                    continue;
+                }
+                if !ids.contains(&member) {
+                    ids.push(member);
+                }
+            }
+        }
+        // What the user *sees*: lay the scene out first when it is cold, the
+        // same way `outline_text` does.
+        self.warm_scene();
+        let graph = RegionGraph::from_scene(self.scene.scene(), &ids);
+        let plan = RegionPlanWire {
+            sources: graph
+                .sources
+                .iter()
+                .map(|source| PlanSourceWire {
+                    id: source.id.to_string(),
+                    name: self.geometry_name(source.id),
+                    area: vectra_geometry::region_area(&source.region),
+                    bounds: {
+                        let (min_x, min_y, max_x, max_y) = vectra_geometry::source_bounds(source);
+                        [min_x, min_y, max_x, max_y]
+                    },
+                    spans: graph
+                        .spans_of_source(source.id)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, span)| PlanSpanWire {
+                            index,
+                            from: span.from,
+                            to: span.to,
+                            ring: span.ring,
+                            start: [span.start.0, span.start.1],
+                            end: [span.end.0, span.end.1],
+                            length: span.length,
+                            total: span.total,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            regions: graph
+                .faces
+                .iter()
+                .enumerate()
+                .map(|(index, face)| PlanRegionWire {
+                    index,
+                    area: face.area,
+                    holes: face.holes,
+                    members: graph
+                        .sources
+                        .iter()
+                        .zip(face.members.iter())
+                        .filter(|(_, inside)| **inside)
+                        .map(|(source, _)| source.id.to_string())
+                        .collect(),
+                    path: vectra_geometry::path_to_svg_data(&face.path),
+                    // The same region again as coordinates, because the overlay
+                    // draws it with the renderer's camera mapping
+                    // (`documentToClient`) and never parses path data of its own.
+                    rings: vectra_geometry::path_rings(&face.path)
+                        .iter()
+                        .map(|ring| ring.iter().map(|p| [p.x, p.y]).collect())
+                        .collect(),
+                })
+                .collect(),
+            crossings: graph
+                .crossings
+                .iter()
+                .map(|crossing| [crossing.point.0, crossing.point.1])
+                .collect(),
+            hit: point.and_then(|p| graph.face_at(p)),
+        };
+        serde_json::to_string(&plan)
+            .unwrap_or_else(|_| r#"{"sources":[],"regions":[],"crossings":[]}"#.to_string())
+    }
+
+    /// **Break a path at the intersections of its outline** (Task 12.0 RULE 3).
+    ///
+    /// `spans_json` is `[[from, to], …]` — arc lengths along the node's outline,
+    /// exactly the numbers [`Self::smart_fill_plan`] reported, so the UI echoes
+    /// what the engine measured instead of computing a cut of its own.
+    ///
+    /// **The spans are read as cut positions, and that is the whole algorithm.**
+    /// A span's two ends *are* two crossings; collect the ends of every span the
+    /// caller named, walk the ring between consecutive cuts, and each arc
+    /// between them is one piece. Nothing about the count of pieces is special-
+    /// cased, and both gestures fall out of the same rule:
+    ///
+    /// * one span → two cuts → **two** complementary arcs (the span, and the rest
+    ///   of the ring) — "break this span";
+    /// * every span of a path crossed twice → two distinct cuts → **two** arcs
+    ///   that tile the ring — "Break Path at Intersections".
+    ///
+    /// A ring nothing crosses is not broken: it is carried over as a piece of its
+    /// own, so every point of the outline ends up in exactly one piece. The
+    /// pieces become ordinary closed `Path` nodes wearing the source's paint, and
+    /// the source is hidden rather than deleted — one undo away, and the region
+    /// graph that suggested the cut is still there to re-read.
+    #[wasm_bindgen]
+    pub fn break_path(&mut self, node_id: &str, spans_json: &str) -> String {
+        let Some(id) = vectra_core::parse_node_id(node_id) else {
+            return CommandResponse::err_json("invalid id".to_string());
+        };
+        let spans: Vec<(f64, f64)> = match serde_json::from_str(spans_json) {
+            Ok(spans) => spans,
+            Err(error) => return CommandResponse::err_json(format!("invalid span list: {error}")),
+        };
+        if spans.is_empty() {
+            return CommandResponse::err_json(
+                "there is nothing to break: no spans were given".to_string(),
+            );
+        }
+        let is_path = matches!(
+            self.core.document().nodes.get(&id).map(|node| &node.kind),
+            Some(NodeKind::Path { .. })
+        );
+        if !is_path {
+            return CommandResponse::err_json(
+                "only a Path can be broken at its intersections".to_string(),
+            );
+        }
+        self.warm_scene();
+        let rings = vectra_geometry::source_rings(self.scene.scene(), id);
+        if rings.is_empty() {
+            return CommandResponse::err_json(
+                "the path has no closed outline to break at".to_string(),
+            );
+        }
+        // Ring-major arc bases: the plan's spans are outline-relative, and the
+        // splitter works within one ring.
+        let lengths: Vec<f64> = rings.iter().map(|ring| ring_arc_length(ring)).collect();
+        let mut bases: Vec<f64> = Vec::with_capacity(lengths.len());
+        let mut walked = 0.0;
+        for length in &lengths {
+            bases.push(walked);
+            walked += *length;
+        }
+        // Where each ring is cut: the ends of every span the caller named, in
+        // the ring's own arc lengths, deduplicated (a crossing that bounds two
+        // spans is one cut) and sorted, so "between consecutive cuts" makes
+        // sense. `TOLERANCE` is the same epsilon the geometry crate measures
+        // crossings with — a cut half a tolerance from another is the same cut.
+        const TOLERANCE: f64 = 1e-6;
+        let mut cuts: Vec<Vec<f64>> = vec![Vec::new(); rings.len()];
+        let ring_of = |position: f64, bases: &[f64], lengths: &[f64]| -> usize {
+            bases
+                .iter()
+                .zip(lengths)
+                .position(|(start, length)| {
+                    position >= start - TOLERANCE && position <= start + length + TOLERANCE
+                })
+                .unwrap_or(0)
+        };
+        for (from, to) in &spans {
+            for position in [*from, *to] {
+                let index = ring_of(position, &bases, &lengths);
+                let local = position - bases[index];
+                if !cuts[index]
+                    .iter()
+                    .any(|existing| (existing - local).abs() <= TOLERANCE)
+                {
+                    cuts[index].push(local);
+                }
+            }
+        }
+        for ring_cuts in cuts.iter_mut() {
+            ring_cuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        let name = self.geometry_name(id);
+        let mut pieces: Vec<vectra_core::OutlinePath> = Vec::new();
+        for (index, ring) in rings.iter().enumerate() {
+            if cuts[index].len() < 2 {
+                // Nothing crosses this ring: it survives the break whole.
+                if let Some(piece) = outline_piece(
+                    &ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(),
+                    &name,
+                    pieces.len() + 1,
+                ) {
+                    pieces.push(piece);
+                }
+                continue;
+            }
+            let count = cuts[index].len();
+            for position in 0..count {
+                let from = cuts[index][position];
+                let to = cuts[index][(position + 1) % count];
+                let (arc, _) = vectra_geometry::ring_pieces_between(ring, from, to);
+                let Some(piece) = outline_piece(&arc, &name, pieces.len() + 1) else {
+                    continue;
+                };
+                pieces.push(piece);
+            }
+        }
+        if pieces.is_empty() {
+            return CommandResponse::err_json(
+                "the spans produced no pieces: they are shorter than the tolerance".to_string(),
+            );
+        }
+        self.dispatch_side_command(&Command::BreakPath {
+            node_id: id,
+            pieces,
+        })
+    }
+
+    /// The families the host's font library can resolve, as a JSON array —
+    /// the Text panel's picker. Always non-empty: the bundled face is in it.
+    #[wasm_bindgen]
+    pub fn font_families(&self) -> String {
+        serde_json::to_string(&self.fonts.families()).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Register a face for a family name (Task 11.0 RULE 1), as raw bytes.
+    ///
+    /// Registration is *validating*: bytes that do not parse as a font are
+    /// refused and nothing changes, so a bad upload can never become a text node
+    /// that silently draws nothing.
+    #[wasm_bindgen]
+    pub fn register_font(&mut self, family: &str, bytes: &[u8]) -> String {
+        match self.fonts.register(family, bytes.to_vec()) {
+            Ok(()) => format!(r#"{{"status":"ok","families":{}}}"#, self.font_families()),
+            Err(error) => CommandResponse::err_json(error.to_string()),
+        }
+    }
+
     /// The structural macros the command bar offers as one-tap chips (RULE 2):
     /// the prompt text, plus what it will do, in the designer's words.
     #[wasm_bindgen]
@@ -1272,6 +1671,15 @@ impl VectraEngine {
             | Command::InstantiateComponent { id, .. }
             | Command::DuplicateNode { id, .. } => Some(*id),
             Command::CreateArtboard { id, .. } => Some(*id),
+            // An outline *creates* the letterform group: selecting it is what a
+            // designer expects to happen after they outline a word.
+            Command::OutlineText { group_id, .. } => Some(*group_id),
+            // Task 12.0: a fill is an object the designer wants selected the
+            // moment it exists (its paint is the next thing they set), and a
+            // break's first piece is the piece whose spans they just read — one
+            // namespace, one "select what I made".
+            Command::CreateSmartFill { id, .. } => Some(*id),
+            Command::BreakPath { pieces, .. } => pieces.first().map(|piece| piece.id),
             Command::Batch { commands } => commands.iter().rev().find_map(Self::created_by),
             _ => None,
         }
@@ -1688,7 +2096,8 @@ impl VectraEngine {
             .evaluation_context()
             .with_expression(&self.expressions)
             .with_motion(&self.motion)
-            .with_procedural(&self.procedural);
+            .with_procedural(&self.procedural)
+            .with_fonts(&self.fonts);
         DocumentSummary::capture_selection_in(self.core.document(), &ctx, &self.selection.borrow())
     }
 
@@ -1714,7 +2123,8 @@ impl VectraEngine {
             .evaluation_context()
             .with_expression(&self.expressions)
             .with_motion(&self.motion)
-            .with_procedural(&self.procedural);
+            .with_procedural(&self.procedural)
+            .with_fonts(&self.fonts);
         self.motion.is_animating(self.core.document(), &ctx)
     }
 
@@ -1727,7 +2137,8 @@ impl VectraEngine {
             .evaluation_context()
             .with_expression(&self.expressions)
             .with_motion(&self.motion)
-            .with_procedural(&self.procedural);
+            .with_procedural(&self.procedural)
+            .with_fonts(&self.fonts);
         let status = self.motion.status(self.core.document(), &ctx);
         let mut bindings = Vec::new();
         for node in self.core.document().nodes.values() {
@@ -1793,7 +2204,8 @@ impl VectraEngine {
                 .evaluation_context()
                 .with_expression(expressions)
                 .with_motion(motion)
-                .with_procedural(procedural);
+                .with_procedural(procedural)
+                .with_fonts(&self.fonts);
             scene.refresh_full(core.document(), &ctx)
         };
         // A full rebuild recomputes the virtual layer too, so `patch ≡ rebuild`
@@ -1835,7 +2247,8 @@ impl VectraEngine {
             .evaluation_context()
             .with_expression(&self.expressions)
             .with_motion(&self.motion)
-            .with_procedural(&self.procedural);
+            .with_procedural(&self.procedural)
+            .with_fonts(&self.fonts);
         match capture_value(self.core.document(), &ctx, constraint) {
             Ok(value) => {
                 constraint.value = Some(value);
@@ -1888,7 +2301,8 @@ impl VectraEngine {
                 .evaluation_context()
                 .with_expression(expressions)
                 .with_motion(motion)
-                .with_procedural(procedural);
+                .with_procedural(procedural)
+                .with_fonts(&self.fonts);
             solver.solve(core.document(), &ctx, &hints)?
         };
 
@@ -1959,7 +2373,8 @@ impl VectraEngine {
             .evaluation_context()
             .with_expression(&self.expressions)
             .with_motion(&self.motion)
-            .with_procedural(&self.procedural);
+            .with_procedural(&self.procedural)
+            .with_fonts(&self.fonts);
         param.resolve(&ctx).ok()
     }
 
@@ -2126,7 +2541,8 @@ impl VectraEngine {
                 .evaluation_context()
                 .with_expression(expressions)
                 .with_motion(motion)
-                .with_procedural(procedural);
+                .with_procedural(procedural)
+                .with_fonts(&self.fonts);
             solver.begin_drag(core.document(), &ctx, node_id)
         };
         let outcome = match outcome {
@@ -2189,7 +2605,8 @@ impl VectraEngine {
                 .evaluation_context()
                 .with_expression(expressions)
                 .with_motion(motion)
-                .with_procedural(procedural);
+                .with_procedural(procedural)
+                .with_fonts(&self.fonts);
             solver.update_drag(core.document(), &ctx, x, y)
         };
         let outcome = match outcome {
@@ -2335,7 +2752,8 @@ impl VectraEngine {
             .evaluation_context()
             .with_expression(&self.expressions)
             .with_motion(&self.motion)
-            .with_procedural(&self.procedural);
+            .with_procedural(&self.procedural)
+            .with_fonts(&self.fonts);
         let mut positions = BTreeMap::new();
         for (id, node) in &doc.nodes {
             let Some((x_slot, y_slot)) = node.position_slots() else {
@@ -2362,6 +2780,74 @@ impl VectraEngine {
         positions
     }
 
+    /// The typography inspector's rows by node id (Task 11.0) — the text twin
+    /// of [`Self::positions`]: resolved through the ordinary parameter door (so
+    /// a slot driven by `$variable` / `ƒexpression` / a spring reports its
+    /// current value) and carrying each slot's source tag, so the panel can warn
+    /// before a slider drag breaks a parametric link.
+    fn texts(&self) -> BTreeMap<String, SnapshotText> {
+        let doc = self.core.document();
+        let ctx = self
+            .core
+            .evaluation_context()
+            .with_expression(&self.expressions)
+            .with_motion(&self.motion)
+            .with_procedural(&self.procedural)
+            .with_fonts(&self.fonts);
+        let mut texts = BTreeMap::new();
+        for (id, node) in &doc.nodes {
+            let NodeKind::Text {
+                text,
+                font_family,
+                font_size,
+                letter_spacing,
+                line_height,
+                alignment,
+                on_path,
+                ..
+            } = &node.kind
+            else {
+                continue;
+            };
+            // A slot that cannot resolve has no row: the panel then falls back
+            // to the command surface rather than showing a stale number as if
+            // it were current.
+            let (Ok(size), Ok(spacing), Ok(leading)) = (
+                font_size.resolve(&ctx),
+                letter_spacing.resolve(&ctx),
+                line_height.resolve(&ctx),
+            ) else {
+                continue;
+            };
+            let (bound_to, offset, offset_source) = match on_path {
+                Some(binding) => (
+                    Some(binding.node.to_string()),
+                    binding.offset.resolve(&ctx).ok(),
+                    Some(binding.offset.source_tag().to_string()),
+                ),
+                None => (None, None, None),
+            };
+            texts.insert(
+                id.to_string(),
+                SnapshotText {
+                    text: text.clone(),
+                    font_family: font_family.clone(),
+                    alignment: alignment.tag().to_string(),
+                    font_size: size,
+                    font_size_source: font_size.source_tag().to_string(),
+                    letter_spacing: spacing,
+                    letter_spacing_source: letter_spacing.source_tag().to_string(),
+                    line_height: leading,
+                    line_height_source: line_height.source_tag().to_string(),
+                    bound_to,
+                    offset,
+                    offset_source,
+                },
+            );
+        }
+        texts
+    }
+
     /// Post-mutation protocol: reunite the compiled registry, reconcile the
     /// dependency graph, propagate dirty ids, patch the scene, and report what
     /// it cost as a `Dirty` event.
@@ -2386,6 +2872,17 @@ impl VectraEngine {
         let restored = self.clip.pending_restores(self.core.document());
         let mut dirty = self.graph.dirty_ids_for_events(&events);
         for id in restored {
+            if !dirty.contains(&id) {
+                dirty.push(id);
+            }
+        }
+        // **Task 11.0 RULE 2**: a run bound to a path has no graph edge to the
+        // path's *geometry* — the binding is a geometry-to-geometry reference and
+        // the graph is a graph of slots. The propagation step is therefore a
+        // registry scan seeded by the dirty set, exactly as it is for the
+        // operations pass and the procedural `Source` pass: reshape the circle
+        // and the text that rides it is dirtied here, in the same settle.
+        for id in self.core.document().text_nodes_bound_to(&dirty) {
             if !dirty.contains(&id) {
                 dirty.push(id);
             }
@@ -2492,6 +2989,89 @@ impl VectraEngine {
         EngineEvent::Dirty { ids, mode }
     }
 
+    /// Lay the scene out if it has never been evaluated (or if the last pass
+    /// was not a full one). The read-only queries call this before they answer,
+    /// so a fresh document answers a question about geometry it actually has.
+    fn warm_scene(&mut self) {
+        let Self {
+            core,
+            expressions,
+            scene,
+            motion,
+            procedural,
+            ..
+        } = self;
+        let ctx = core
+            .evaluation_context()
+            .with_expression(expressions)
+            .with_motion(motion)
+            .with_procedural(procedural)
+            .with_fonts(&self.fonts);
+        scene.refresh_if_cold(core.document(), &ctx);
+    }
+
+    /// **Which paths RULE 1 means by "the paths"**: the selection when there is
+    /// one, else the shapes of the active layer.
+    ///
+    /// Selection-first is the rule's own order ("selected or overlapping"), and
+    /// it is also what makes the tool usable: select two circles, and the region
+    /// graph is theirs — not the whole layer's. With nothing selected, the active
+    /// layer is the drawing surface the designer is looking at, which is the only
+    /// other honest answer. Groups are skipped: a group is not a boundary.
+    fn editing_context(&self) -> Vec<NodeId> {
+        let doc = self.core.document();
+        let shapes = |ids: &[NodeId]| -> Vec<NodeId> {
+            ids.iter()
+                .copied()
+                .filter(|id| {
+                    doc.nodes
+                        .get(id)
+                        .is_some_and(|node| !matches!(node.kind, NodeKind::Group { .. }))
+                })
+                .collect()
+        };
+        let selected = shapes(&self.selection.borrow());
+        if !selected.is_empty() {
+            return selected;
+        }
+        let Some(layer) = doc.active_layer() else {
+            return Vec::new();
+        };
+        // Top-level children only: a group's members are already inside their
+        // group, and a nested shape would be counted twice.
+        let members: Vec<NodeId> = doc
+            .layers
+            .get(&layer)
+            .map(|record| record.children.clone())
+            .unwrap_or_default();
+        shapes(&members)
+    }
+
+    /// Is this id a group record?
+    fn is_group(doc: &vectra_core::Document, id: NodeId) -> bool {
+        matches!(
+            doc.nodes.get(&id).map(|node| &node.kind),
+            Some(NodeKind::Group { .. })
+        )
+    }
+
+    /// The display name of any live id — an authored node, an operation result
+    /// or a procedural node. One reader, so the plan, the panel and the event log
+    /// name the same thing the same way.
+    fn geometry_name(&self, id: NodeId) -> String {
+        let doc = self.core.document();
+        if let Some(node) = doc.nodes.get(&id) {
+            return node.name.clone();
+        }
+        if let Some(operation) = doc.operations.get(id) {
+            return operation.name.clone();
+        }
+        if let Some(node) = doc.procedural.get(id) {
+            return node.describe();
+        }
+        "geometry".to_string()
+    }
+
     /// Recompute the virtual operation nodes the last mutation affected, and
     /// compose them into the scene.
     ///
@@ -2539,7 +3119,8 @@ impl VectraEngine {
                 .evaluation_context()
                 .with_expression(expressions)
                 .with_motion(motion)
-                .with_procedural(procedural);
+                .with_procedural(procedural)
+                .with_fonts(&self.fonts);
             let evaluation = operations.evaluate(core.document(), scene.scene(), &ctx, &targets);
             evaluation
         };
@@ -2554,9 +3135,9 @@ impl VectraEngine {
             .extend(evaluation.diagnostics.iter().cloned());
         let recomputed = evaluation.recomputed.clone();
         evaluation.compose_into(self.scene.scene_mut(), self.core.document());
-        // `compose_into` already dropped anything no longer live, so the
-        // pruning pass is a no-op here; it stays as the single place that
-        // enforces the live-id invariant.
+        // `compose_into` dropped what is no longer live *and* retired the
+        // operations that failed this pass, so a prune here would be a no-op;
+        // the live-id invariant is enforced in the one place both passes share.
         recomputed
     }
 
@@ -2603,7 +3184,10 @@ impl VectraEngine {
             // No procedural door in *this* context: an operand cannot read a
             // procedural output (RULE 3), so passing the table could only tempt
             // a cycle into existence.
-            let ctx = core.evaluation_context().with_expression(expressions);
+            let ctx = core
+                .evaluation_context()
+                .with_expression(expressions)
+                .with_fonts(&self.fonts);
             procedural.evaluate(scene.scene(), &ctx, &seeds)
         };
         evaluation.compose_into(self.scene.scene_mut(), self.core.document());
@@ -2731,13 +3315,15 @@ impl VectraEngine {
             scene,
             motion,
             procedural,
+            fonts,
             ..
         } = self;
         let ctx = core
             .evaluation_context()
             .with_expression(expressions)
             .with_motion(motion)
-            .with_procedural(procedural);
+            .with_procedural(procedural)
+            .with_fonts(fonts);
         scene.refresh(core.document(), &ctx, dirty)
     }
 }
@@ -3131,10 +3717,51 @@ fn operation_ids_of(command: &Command) -> Vec<OperationId> {
     match command {
         Command::ApplyOperation { id, .. }
         | Command::RemoveOperation { id }
-        | Command::SetOperationEnabled { id, .. } => vec![*id],
+        | Command::SetOperationEnabled { id, .. }
+        | Command::CreateSmartFill { id, .. } => vec![*id],
         Command::Batch { commands } => commands.iter().flat_map(operation_ids_of).collect(),
         _ => Vec::new(),
     }
+}
+
+/// One broken arc as a closed path: the first point, a line to each point
+/// after it, and a close — which is the segment the split's own cut implies.
+///
+/// A piece of two points is legal (a span cut out of a straight segment): the
+/// path is then a single degenerate edge, and it is still a *closed* path, which
+/// is what RULE 3's "no gaps" is stated in terms of.
+fn outline_piece(
+    points: &[(f64, f64)],
+    name: &str,
+    index: usize,
+) -> Option<vectra_core::OutlinePath> {
+    if points.len() < 2 {
+        return None;
+    }
+    let mut segments: Vec<vectra_core::PathSegment> = points[1..]
+        .iter()
+        .map(|(x, y)| vectra_core::PathSegment::Line {
+            to: Parameter::Literal(Point2::new(*x, *y)),
+        })
+        .collect();
+    segments.push(vectra_core::PathSegment::Close);
+    Some(vectra_core::OutlinePath {
+        id: vectra_core::new_node_id(),
+        name: format!("{name} · {index}"),
+        start: Parameter::Literal(Point2::new(points[0].0, points[0].1)),
+        segments,
+    })
+}
+
+/// The arc length of one closed ring — the splitter's unit.
+fn ring_arc_length(ring: &[vectra_geometry::GeoCoord<f64>]) -> f64 {
+    (0..ring.len())
+        .map(|index| {
+            let p = ring[index];
+            let q = ring[(index + 1) % ring.len()];
+            (q.x - p.x).hypot(q.y - p.y)
+        })
+        .sum()
 }
 
 /// Eight-character id prefix, as the inspector and the event log show it.

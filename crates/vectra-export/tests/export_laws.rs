@@ -17,6 +17,7 @@ use vectra_export::{
     compile_to_ir, export_react, export_react_with, export_svg, translate_expression,
     ExportGeometry, ExportIR, ReactOptions,
 };
+use vectra_geometry::{path_to_svg_data, EvaluatedPrimitive, GeometryEvaluator};
 
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -661,4 +662,103 @@ fn an_empty_document_exports_an_empty_picture() {
     let svg = export_svg(&ir);
     assert!(svg.contains("<svg"), "{svg}");
     assert!(!svg.contains("<rect"), "{svg}");
+}
+
+// ── Task 11.0: text exports as geometry, not as type ───────────────────────
+
+/// A document with one text node, and the family it asks for.
+///
+/// The id is a parameter so two documents that differ only in their typography
+/// can be compared byte for byte — the export writes the node's id into the file
+/// (that is how a designer finds the node again), and it is the one thing a fair
+/// comparison must hold fixed.
+fn text_doc(id: vectra_core::NodeId, word: &str, size: f64, family: &str) -> Engine {
+    let mut engine = Engine::new();
+    let kind = match NodeKind::text(10.0, 40.0, word, size) {
+        NodeKind::Text {
+            text,
+            font_size,
+            letter_spacing,
+            line_height,
+            alignment,
+            x,
+            y,
+            ..
+        } => NodeKind::Text {
+            text,
+            font_family: family.to_string(),
+            font_size,
+            letter_spacing,
+            line_height,
+            alignment,
+            x,
+            y,
+            on_path: None,
+        },
+        other => other,
+    };
+    engine
+        .dispatch(Command::CreateNode {
+            id,
+            kind,
+            name: Some("word".to_string()),
+            index: None,
+        })
+        .expect("CreateNode");
+    engine
+}
+
+/// **The export strategy for text (RULE 4's boundary claim)**: a text node
+/// leaves the exporter as **geometry** — one font-independent `<path>` whose `d`
+/// is exactly the outline the canvas draws — and never as a `<text>` element
+/// that would need the reader's machine to own the same font.
+///
+/// This is the property that makes an exported file render identically
+/// everywhere: the letterforms travel inside the file, and the *family name*
+/// does not appear in it at all.
+#[test]
+fn text_exports_as_font_independent_paths() {
+    let id = new_node_id();
+    let engine = text_doc(id, "Vectra", 32.0, "Vectra Sans");
+    let ir = compile_to_ir(engine.document());
+    assert_eq!(ir.nodes.len(), 1);
+
+    // 1. The geometry is a path with a `d` — the outline, not a rectangle or a
+    //    placeholder box.
+    let d = match &ir.nodes[0].geometry {
+        ExportGeometry::Path { d } => d.clone().expect("a text node exports a `d`"),
+        other => panic!("text must export as a Path, got {other:?}"),
+    };
+    assert!(d.starts_with('M'), "path data starts a subpath: {d}");
+
+    // 2. It is *the same* outline the canvas draws — the export re-uses the
+    //    evaluation rather than outlining a second time (a second outline could
+    //    only ever disagree).
+    let ctx = engine.evaluation_context();
+    let scene = GeometryEvaluator::new()
+        .evaluate_full(engine.document(), &ctx)
+        .scene;
+    let run = match &scene.get(id).expect("the run is in the scene").primitive {
+        EvaluatedPrimitive::Text(run) => run.clone(),
+        other => panic!("expected a text run, got {}", other.tag()),
+    };
+    assert_eq!(d, path_to_svg_data(&run.outline));
+
+    // 3. The file says `<path>`, and mentions neither `<text>` nor a font.
+    let svg = export_svg(&ir);
+    assert!(svg.contains("<path"), "{svg}");
+    let lower = svg.to_lowercase();
+    assert!(
+        !lower.contains("<text"),
+        "an exported run must not be `<text>`: {svg}"
+    );
+    assert!(!lower.contains("font-family"), "{svg}");
+    assert!(!lower.contains("vectra sans"), "{svg}");
+
+    // 4. **The file does not depend on the font being installed**: a document
+    //    that names a family this machine has never seen exports the *same*
+    //    bytes, because the run fell back to the bundled face and its outline is
+    //    what travels.
+    let unknown = text_doc(id, "Vectra", 32.0, "Helvetica Neu");
+    assert_eq!(export_svg(&compile_to_ir(unknown.document())), svg);
 }

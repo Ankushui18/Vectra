@@ -70,6 +70,27 @@ pub enum DiagnosticCode {
     /// A procedural node's *result* encloses no area: the region it builds is
     /// degenerate, so there is nothing to draw or to feed downstream.
     ProceduralEmptyResult,
+    /// A text node's family is not in the host's font library, so the run was
+    /// shaped with the **bundled face** (Task 11.0). A warning rather than an
+    /// error: the words are drawn, they are simply not set in the typeface the
+    /// document asked for — which is precisely what a designer needs to be told.
+    FontFallback,
+    /// A text run could not be laid out at all (Task 11.0): the face would not
+    /// parse, or a resolved value was not usable. The node is skipped, like any
+    /// other node whose geometry cannot be built.
+    TextLayoutFailed,
+    /// **A Smart Fill covers nothing** (Task 12.0 RULE 2): the boundaries it
+    /// reads no longer enclose the region it was dropped into — they were moved
+    /// apart, or the seed point fell outside every face. A warning, not an
+    /// error: the fill contributes no geometry this pass, and the designer is
+    /// told why instead of being left with a shape that silently vanished.
+    SmartFillEmpty,
+    /// A bound run is **longer than the path it rides** (Task 11.0 RULE 2): the
+    /// glyphs that do not fit were left out — each at its own arc position, so
+    /// the survivors keep their spacing and nothing piles up at the seam. A
+    /// warning rather than an error: the words that fit are drawn, and the
+    /// designer is told the rest is off the path.
+    TextOverflow,
 }
 
 impl DiagnosticCode {
@@ -87,6 +108,10 @@ impl DiagnosticCode {
             Self::ProceduralFailed => "procedural-failed",
             Self::ProceduralMissingInput => "procedural-missing-input",
             Self::ProceduralEmptyResult => "procedural-empty-result",
+            Self::FontFallback => "font-fallback",
+            Self::TextLayoutFailed => "text-layout-failed",
+            Self::TextOverflow => "text-overflow",
+            Self::SmartFillEmpty => "smart-fill-empty",
         }
     }
 }

@@ -29,7 +29,10 @@ use crate::paint::{
     EvaluatedAppearance, EvaluatedAppearanceKind, EvaluatedGradient, EvaluatedPaint,
 };
 use crate::paths::{build_path, ResolvedSegment};
-use crate::scene::{EvaluatedNode, EvaluatedPrimitive, EvaluatedScene, EvaluatedStyle};
+use crate::scene::{
+    EvaluatedNode, EvaluatedPrimitive, EvaluatedScene, EvaluatedStyle, EvaluatedText,
+};
+use crate::text::{layout_text, layout_text_on_path, resolve_face, FaceRef, TextError, TextSpec};
 use std::collections::HashSet;
 use vectra_core::{
     Color, Document, EvaluationContext, Node, NodeId, NodeKind, Parameter, PathSegment, Point2,
@@ -188,7 +191,9 @@ impl Evaluator for GeometryEvaluator {
             // two booleans and never walks the layer registry (RULE 4).
             let visible = doc.visible(id);
             let locked = doc.locked(id);
-            if let Some(evaluated) = evaluate_node(node, ctx, visible, locked, &mut diagnostics) {
+            if let Some(evaluated) =
+                evaluate_node(node, doc, ctx, visible, locked, &mut diagnostics)
+            {
                 scene.nodes.insert(id, evaluated);
             }
         }
@@ -209,11 +214,40 @@ impl Evaluator for GeometryEvaluator {
 
 fn evaluate_node(
     node: &Node,
+    doc: &Document,
     ctx: &EvaluationContext,
     visible: bool,
     locked: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<EvaluatedNode> {
+    let primitive = evaluate_primitive(node, doc, ctx, diagnostics)?;
+    let style = resolve_style(node, ctx, diagnostics);
+    Some(EvaluatedNode {
+        id: node.id,
+        primitive,
+        style,
+        // RULE 4: presentation flags travel with the evaluated node, so the
+        // renderer and the hit index read them from the scene they already hold
+        // rather than reaching back into the document.
+        visible,
+        locked,
+    })
+}
+
+/// Resolve one node's geometry, **without** its style or its presentation
+/// flags.
+///
+/// Split out of [`evaluate_node`] for one caller: a text run bound to a path must
+/// read that path's geometry, and it must do so *during its own* evaluation,
+/// whatever position the path happens to occupy in the document's draw order.
+/// Reading the scene instead would make a run's picture depend on evaluation
+/// order — the one thing this crate's totality contract exists to prevent.
+fn evaluate_primitive(
+    node: &Node,
+    doc: &Document,
+    ctx: &EvaluationContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<EvaluatedPrimitive> {
     let id = node.id;
     let primitive = match &node.kind {
         // Structural only in Phase 1 (no transforms): flatten. Children keep
@@ -330,19 +364,191 @@ fn evaluate_node(
             }
             EvaluatedPrimitive::Path(build_path(start, &resolved))
         }
+        // **Text (Task 11.0 RULE 1).** A run's geometry *is* its glyph
+        // outlines: they are shaped and laid out, in document space, right here.
+        // Everything downstream then treats text like any other primitive —
+        // there is no text branch in the tessellator, the hit test or the
+        // exporter, because by the time a run leaves this function it is a path.
+        //
+        // Every number that can drive the layout was resolved through the
+        // ordinary parameter door, which is what makes RULE 1's promise true:
+        // change a `font_size` variable, an expression or a spring and the very
+        // next evaluation lays the glyphs out again, at the new size.
+        NodeKind::Text {
+            text,
+            font_family,
+            font_size,
+            letter_spacing,
+            line_height,
+            alignment,
+            x,
+            y,
+            on_path,
+        } => {
+            let size = clamp_non_negative(
+                resolve_scalar(font_size, ctx, id, "font_size", diagnostics).ok()?,
+                id,
+                "font_size",
+                diagnostics,
+            );
+            let letter_spacing =
+                resolve_scalar(letter_spacing, ctx, id, "letter_spacing", diagnostics).ok()?;
+            // Leading is a multiple of the size, so its meaningful range is
+            // small: a negative multiple would set lines on top of each other in
+            // reverse, and a huge one is a typo. Clamped, never fatal — the same
+            // policy as a negative width.
+            let line_height = clamp_range(
+                resolve_scalar(line_height, ctx, id, "line_height", diagnostics).ok()?,
+                0.0,
+                100.0,
+                id,
+                "line_height",
+                diagnostics,
+            );
+            let (face, substituted) = resolve_face(ctx.fonts, font_family);
+            if substituted {
+                diagnostics.push(Diagnostic::warning(
+                    id,
+                    "font_family",
+                    DiagnosticCode::FontFallback,
+                    format!(
+                        "font family {:?} is not in the host's font library; shaped with the bundled face",
+                        font_family
+                    ),
+                ));
+            }
+            let spec = TextSpec {
+                text,
+                family: font_family,
+                size,
+                letter_spacing,
+                line_height,
+                alignment: *alignment,
+            };
+            // Where the run goes is decided **before** the face is asked to
+            // shape it: the two are independent, and splitting them here is what
+            // makes the fallback retry below a plain second call.
+            let placement = match on_path {
+                // RULE 2: the run follows a *source* node's geometry, which is
+                // resolved on the spot. Reading it from the cached scene instead
+                // would make the run's picture depend on which node the
+                // evaluator happened to visit first.
+                Some(binding) => {
+                    let offset =
+                        resolve_scalar(&binding.offset, ctx, id, "path_offset", diagnostics)
+                            .ok()?;
+                    match bound_source_path(binding.node, doc, ctx, diagnostics) {
+                        Some(path) => Placement::OnPath(path, offset),
+                        // The binding's target is gone (or is not path-shaped):
+                        // an empty run, not a failure. Undoing the delete of a
+                        // bound path restores the run exactly.
+                        None => Placement::Nowhere,
+                    }
+                }
+                None => Placement::Straight(
+                    resolve_scalar(x, ctx, id, "x", diagnostics).ok()?,
+                    resolve_scalar(y, ctx, id, "y", diagnostics).ok()?,
+                ),
+            };
+            let lay_out = |face: FaceRef<'_>| -> Result<EvaluatedText, TextError> {
+                match &placement {
+                    Placement::Straight(x, y) => layout_text(face, &spec, (*x, *y)),
+                    Placement::OnPath(path, offset) => {
+                        layout_text_on_path(face, &spec, path, *offset)
+                    }
+                    Placement::Nowhere => Ok(EvaluatedText::empty()),
+                }
+            };
+            let mut laid_out = lay_out(face);
+            // **A face that cannot be used is not the end of the words.** A host
+            // may hand over bytes no shaper can read (a custom provider is not
+            // required to validate its faces the way `FontLibrary` does). Rather
+            // than skipping the node — which would make a constraint that reads
+            // the run's box see it vanish — the run is drawn with the bundled
+            // face and the substitution is reported, exactly like a family that
+            // is not installed.
+            if matches!(
+                laid_out,
+                Err(TextError::InvalidFace(_)) | Err(TextError::DegenerateFace)
+            ) && !face.is_bundled()
+            {
+                diagnostics.push(Diagnostic::warning(
+                    id,
+                    "font_family",
+                    DiagnosticCode::FontFallback,
+                    format!(
+                        "font family {:?} could not be used as a font; shaped with the bundled face",
+                        font_family
+                    ),
+                ));
+                laid_out = lay_out(FaceRef::bundled());
+            }
+            match laid_out {
+                Ok(run) => {
+                    if run.truncated > 0 {
+                        diagnostics.push(Diagnostic::warning(
+                            id,
+                            "path_offset",
+                            DiagnosticCode::TextOverflow,
+                            format!(
+                                "{} glyph(s) of this run do not fit on the bound path; they are left out, the rest keep their spacing",
+                                run.truncated
+                            ),
+                        ));
+                    }
+                    EvaluatedPrimitive::Text(run)
+                }
+                Err(error) => {
+                    diagnostics.push(Diagnostic::error(
+                        id,
+                        "text",
+                        DiagnosticCode::TextLayoutFailed,
+                        format!("{error}; node skipped"),
+                    ));
+                    return None;
+                }
+            }
+        }
     };
+    Some(primitive)
+}
 
-    let style = resolve_style(node, ctx, diagnostics);
-    Some(EvaluatedNode {
-        id,
-        primitive,
-        style,
-        // RULE 4: presentation flags travel with the evaluated node, so the
-        // renderer and the hit index read them from the scene they already hold
-        // rather than reaching back into the document.
-        visible,
-        locked,
-    })
+/// Where a run goes once it is shaped: the two independent halves of a text
+/// node's geometry, split so a face failure never has to be resolved twice.
+enum Placement {
+    /// On its own baseline, at the node's `(x, y)`.
+    Straight(f64, f64),
+    /// Along a source's evaluated geometry, slid by `offset` document units.
+    OnPath(lyon::path::Path, f64),
+    /// Bound to a source that no longer exists (or is not path-shaped): an empty
+    /// run, not a failure.
+    Nowhere,
+}
+
+/// The path a bound run follows: the **evaluated geometry** of the binding's
+/// target, resolved on the spot.
+///
+/// Only path-shaped kinds are followed ([`Document::is_text_path_source`], the
+/// same predicate `Command::BindTextToPath` validates against), so a binding can
+/// never chain text to text — however a document was authored or hand-edited,
+/// this recursion is one level deep.
+fn bound_source_path(
+    node_id: NodeId,
+    doc: &Document,
+    ctx: &EvaluationContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<lyon::path::Path> {
+    let node = doc.nodes.get(&node_id)?;
+    if !Document::is_text_path_source(&node.kind) {
+        return None;
+    }
+    let primitive = evaluate_primitive(node, doc, ctx, diagnostics)?;
+    // The **curve** view, not the region polygonization: a run's rotation is
+    // read from this path's tangents, and a 64-gon's edge direction jumps by
+    // 5.6° at every vertex however large the circle is (see
+    // [`crate::paths::primitive_to_curve_path`]). The polygonized view is the
+    // right answer for fills, bools and hit tests — just not for tangents.
+    Some(crate::paths::primitive_to_curve_path(&primitive))
 }
 
 /// Resolve a geometry scalar: failure or non-renderable value skips the node.

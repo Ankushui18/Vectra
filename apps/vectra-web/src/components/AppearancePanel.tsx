@@ -42,6 +42,7 @@ import {
   togglePaint,
   updateLayerAt,
 } from '../engine/panels';
+import type { SpanRow } from '../engine/draw/regions';
 import type { SnapshotAppearanceWire, SnapshotNodeWire, SnapshotPaintWire } from '../engine/wire';
 import type { CommandWire } from '../engine/wire';
 
@@ -49,6 +50,20 @@ export interface AppearancePanelProps {
   node: SnapshotNodeWire | null;
   onCommand: (label: string, command: CommandWire) => void;
   disabled?: boolean;
+  /**
+   * **Task 12.0 RULE 3**: the spans of this node's outline, as the engine's
+   * region graph measured them — empty when nothing crosses the path, which is
+   * exactly when there is nothing to break.
+   *
+   * The rows come from the plan, so this panel formats no arc lengths of its own.
+   */
+  spans?: SpanRow[];
+  /**
+   * *Break Path at Intersections*: split the path at the crossings. The rows
+   * carry the engine's own `[from, to]` pairs back to it — the panel chooses
+   * *which* cuts, never *where* they are.
+   */
+  onBreakPath?: (rows: SpanRow[]) => void;
 }
 
 /** The glyph each blend mode shows: a filled circle in the mode's own idiom. */
@@ -59,7 +74,13 @@ const BLEND_GLYPH: Record<string, string> = {
   overlay: '◓',
 };
 
-export function AppearancePanel({ node, onCommand, disabled }: AppearancePanelProps) {
+export function AppearancePanel({
+  node,
+  onCommand,
+  disabled,
+  spans = [],
+  onBreakPath,
+}: AppearancePanelProps) {
   const [openBlend, setOpenBlend] = useState<number | null>(null);
   const [dragRow, setDragRow] = useState<number | null>(null);
   const [dragStop, setDragStop] = useState<{ row: number; stop: number } | null>(null);
@@ -114,6 +135,46 @@ export function AppearancePanel({ node, onCommand, disabled }: AppearancePanelPr
           </button>
         </span>
       </h2>
+
+      {node.primitive.type === 'path' && onBreakPath && (
+        <div className="region-block" data-testid="region-break">
+          <button
+            className="mini"
+            data-testid="break-path"
+            disabled={disabled || spans.length === 0}
+            title={
+              spans.length === 0
+                ? 'Nothing crosses this path — there is no intersection to break at'
+                : 'Split this path at every intersection with the shapes around it'
+            }
+            onClick={() => onBreakPath(spans)}
+          >
+            ✂ Break Path at Intersections
+          </button>
+          {spans.length === 0 ? (
+            <p className="hint" data-testid="region-none">
+              no intersections on this path
+            </p>
+          ) : (
+            <ul className="span-list" data-testid="span-list">
+              {spans.map((row) => (
+                <li className="span-row" key={row.index} data-testid={`span-row-${row.index}`}>
+                  <span className="span-label">{row.label}</span>
+                  <button
+                    className="mini"
+                    data-testid={`break-span-${row.index}`}
+                    disabled={disabled}
+                    title="Break this span: two paths, split at its two crossings"
+                    onClick={() => onBreakPath([row])}
+                  >
+                    break
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       <ul className="appearance-list" data-testid="appearance-list">
         {stack.map((row, index) => {
