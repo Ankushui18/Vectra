@@ -456,7 +456,18 @@ impl DocumentSummary {
         SummaryOperation {
             id: op.id.to_string(),
             kind: op.kind.tag().to_string(),
-            inputs: op.inputs.iter().map(|id| id.to_string()).collect(),
+            // A region operation reads its `kind`'s boundaries; `inputs[0]` is
+            // the seed carrier (see `OperationKind::arity`), not a shape, so the
+            // summary states the shapes the operation actually consumes.
+            inputs: if op.kind.boundaries().is_empty() {
+                op.inputs.iter().map(|id| id.to_string()).collect()
+            } else {
+                op.kind
+                    .boundaries()
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect()
+            },
             enabled: op.enabled,
             name: op.name.clone(),
         }

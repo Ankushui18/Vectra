@@ -457,6 +457,11 @@ export class VectraEngine {
      */
     export_to_svg(): string;
     /**
+     * The families the host's font library can resolve, as a JSON array —
+     * the Text panel's picker. Always non-empty: the bundled face is in it.
+     */
+    font_families(): string;
+    /**
      * Rebuild the whole scene from scratch (the UI's "re-evaluate everything"
      * control). Demonstrably equal to the incremental cache — the app-level
      * witness of `patch ≡ rebuild`.
@@ -494,6 +499,21 @@ export class VectraEngine {
      * Initialize a fresh engine.
      */
     constructor();
+    /**
+     * **Outline a text node to paths** (Task 11.0 RULE 3): the non-destructive
+     * conversion from type to letterforms.
+     *
+     * Shaping lives in `vectra-geometry`, and `Command::OutlineText` carries a
+     * *plan* rather than a font, so the boundary is where the two meet: it
+     * lays the run out, asks the geometry crate for one closed plan per
+     * letterform, mints the group and letterform ids, and dispatches the command
+     * as **one history entry**. Core never learns what a glyph is; the sketch
+     * from the font never leaves this call.
+     *
+     * The original text node is hidden, never deleted — undo restores it
+     * exactly, and its string and parameters are still there to come back to.
+     */
+    outline_text(node_id: string, name?: string | null): string;
     /**
      * The pointer left the canvas: nothing is hovered any more.
      *
@@ -538,6 +558,14 @@ export class VectraEngine {
      * Redo one step. Returns a [`CommandResponse`] JSON string.
      */
     redo(): string;
+    /**
+     * Register a face for a family name (Task 11.0 RULE 1), as raw bytes.
+     *
+     * Registration is *validating*: bytes that do not parse as a font are
+     * refused and nothing changes, so a bad upload can never become a text node
+     * that silently draws nothing.
+     */
+    register_font(family: string, bytes: Uint8Array): string;
     /**
      * Remove a track by id. Undoable; a slot still bound to it fails to resolve
      * until the track returns, and that failure is visible in the event log
@@ -675,6 +703,7 @@ export interface InitOutput {
     readonly vectraengine_export_current_artboard: (a: number) => [number, number];
     readonly vectraengine_export_to_react: (a: number) => [number, number];
     readonly vectraengine_export_to_svg: (a: number) => [number, number];
+    readonly vectraengine_font_families: (a: number) => [number, number];
     readonly vectraengine_force_full_evaluation: (a: number) => [number, number];
     readonly vectraengine_get_snapshot: (a: number) => [number, number];
     readonly vectraengine_icon_set: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -682,11 +711,13 @@ export interface InitOutput {
     readonly vectraengine_is_animating: (a: number) => number;
     readonly vectraengine_motion_json: (a: number) => [number, number];
     readonly vectraengine_new: () => number;
+    readonly vectraengine_outline_text: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_pointer_leave: (a: number) => [number, number];
     readonly vectraengine_pointer_move: (a: number, b: number, c: number, d: number) => [number, number];
     readonly vectraengine_procedural_json: (a: number) => [number, number];
     readonly vectraengine_procedural_kinds: (a: number) => [number, number];
     readonly vectraengine_redo: (a: number) => [number, number];
+    readonly vectraengine_register_font: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_remove_motion_track: (a: number, b: number, c: number) => [number, number];
     readonly vectraengine_render_frame: (a: number, b: number) => [number, number];
     readonly vectraengine_set_component_prop: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];

@@ -34,6 +34,7 @@ import type {
   ComponentViewWire,
   ProceduralKindOptionWire,
   ProceduralReportWire,
+  RegionPlanWire,
   SelectionWire,
   SnapshotWire,
   StructuralMacroWire,
@@ -58,7 +59,32 @@ type MakeMagicEngine = {
   set_component_prop?: (target: string, prop: string, value_json: string) => string;
   icon_set?: (master: string, sizes_json: string) => string;
   structural_macros?: () => string;
+  // Task 12.0: the region surface — the plan query and the break.
+  smart_fill_plan?: (ids_json: string, point_json: string) => string;
+  break_path?: (node_id: string, spans_json: string) => string;
+  // Task 11.0: the typography surface.
+  outline_text?: (node_id: string, name?: string) => string;
+  font_families?: () => string;
+  register_font?: (family: string, bytes: Uint8Array) => string;
 };
+
+/** The Task 11.0 capability probe, separate from [`engineIsOlderThanUi`] so a
+ *  binary from before this task still opens the studio — it simply says type
+ *  is unavailable instead of refusing to run. Same doctrine, its own sentence. */
+export function engineHasText(engine: MakeMagicEngine): boolean {
+  return typeof engine.outline_text === 'function';
+}
+
+/**
+ * The Task 12.0 capability probe: does this binary know about regions?
+ *
+ * A binary from before Task 12.0 has no `smart_fill_plan`, and the Smart Fill
+ * tool then says so in one sentence (the same doctrine as
+ * [`engineHasText`]) rather than pretending every drop landed in empty space.
+ */
+export function engineHasRegions(engine: MakeMagicEngine): boolean {
+  return typeof engine.smart_fill_plan === 'function';
+}
 
 /**
  * Is the engine binary older than the frontend?
@@ -158,6 +184,53 @@ export class VectraClient {
   pointerDoc(clientX: number, clientY: number): DocPoint | null {
     const raw = this.renderer?.pointer_doc(clientX, clientY);
     return raw && raw !== 'null' ? (JSON.parse(raw) as DocPoint) : null;
+  }
+
+  /**
+   * **The region graph of a set of paths** (Task 12.0 RULE 1), with `point`
+   * tested against it.
+   *
+   * `ids` names the boundaries; an **empty list is RULE 1's own default** —
+   * the selection, or else the active layer's shapes — so the tool and the drop
+   * ask for "what the designer is working on" without deciding it themselves.
+   * `point` is the pointer or the drop, in document units; the returned `hit` is
+   * the face it fell in. The engine computes every number here: no module in
+   * this app intersects a path or tests a point in a region of its own.
+   */
+  smartFillPlan(ids: string[], point: [number, number] | null): RegionPlanWire | null {
+    if (typeof this.magic.smart_fill_plan !== 'function') return null;
+    try {
+      const raw = this.magic.smart_fill_plan(
+        JSON.stringify(ids),
+        point ? JSON.stringify(point) : 'null',
+      );
+      const parsed = JSON.parse(raw) as RegionPlanWire & { status?: string };
+      // The reply is an error envelope when the ids were unreadable; a plan that
+      // did not parse is *no* plan, never a made-up one.
+      if (parsed.status === 'error') return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * **Break a path at the spans of its intersections** (Task 12.0 RULE 3).
+   *
+   * `spans` is `[[from, to], …]` in the arc lengths {@link smartFillPlan}
+   * reported — the UI echoes the numbers it was given rather than computing cut
+   * positions of its own, because where an intersection is is the engine's
+   * answer and only the engine's.
+   */
+  breakPath(nodeId: string, spans: Array<[number, number]>): CommandResponseWire {
+    if (typeof this.magic.break_path !== 'function') return this.stale();
+    try {
+      return JSON.parse(
+        this.magic.break_path(nodeId, JSON.stringify(spans)),
+      ) as CommandResponseWire;
+    } catch (error) {
+      return { status: 'error', message: String(error) };
+    }
   }
 
   /**
@@ -508,6 +581,43 @@ export class VectraClient {
       return JSON.parse(
         this.magic.icon_set(master, JSON.stringify(sizes)),
       ) as ComponentReplyWire;
+    } catch (error) {
+      return { status: 'error', message: String(error) };
+    }
+  }
+
+  /** **Outline a text node to paths** (Task 11.0 RULE 3).
+   *
+   *  One call, one undo entry: the boundary lays the run out, mints one closed
+   *  plan per letterform, and dispatches `OutlineText` — which hides the type
+   *  rather than deleting it. The reply carries the group id in `created`, so
+   *  the caller can select what was just made. */
+  outlineText(nodeId: string, name?: string): CommandResponseWire {
+    if (typeof this.magic.outline_text !== 'function') return this.stale();
+    try {
+      return JSON.parse(
+        this.magic.outline_text(nodeId, name ?? undefined),
+      ) as CommandResponseWire;
+    } catch (error) {
+      return { status: 'error', message: String(error) };
+    }
+  }
+
+  /** The families the engine's font library can resolve (the picker). */
+  fontFamilies(): string[] {
+    try {
+      const reply = this.magic.font_families?.();
+      return reply ? (JSON.parse(reply) as string[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Register a face with the engine's font library (raw bytes). */
+  registerFont(family: string, bytes: Uint8Array): CommandResponseWire {
+    if (typeof this.magic.register_font !== 'function') return this.stale();
+    try {
+      return JSON.parse(this.magic.register_font(family, bytes)) as CommandResponseWire;
     } catch (error) {
       return { status: 'error', message: String(error) };
     }

@@ -436,6 +436,38 @@ fn primitive_fingerprint(primitive: &EvaluatedPrimitive) -> String {
             end_angle.to_bits()
         ),
         EvaluatedPrimitive::Path(path) => format!("path|{}", path_to_svg_data(path)),
+        // A run fingerprints through **its geometry and its placement**, not
+        // through its text: two runs with the same glyphs in the same places
+        // draw the same picture, and the incremental laws are laws about
+        // pictures. Every number is bit-exact and every outline is its SVG
+        // `d`, so a one-ulp drift in a glyph's rotation or an advance shows up
+        // as a difference rather than being rounded away.
+        EvaluatedPrimitive::Text(text) => {
+            let metrics = &text.metrics;
+            let mut out = format!(
+                "text|{:016x}{:016x}{:016x}{:016x}{:016x}{}{}|{}",
+                metrics.width.to_bits(),
+                metrics.height.to_bits(),
+                metrics.ascender.to_bits(),
+                metrics.descender.to_bits(),
+                metrics.line_advance.to_bits(),
+                metrics.lines,
+                text.glyphs.len(),
+                path_to_svg_data(&text.outline)
+            );
+            for glyph in &text.glyphs {
+                out.push_str(&format!(
+                    "|{},{},{:016x}{:016x}{:016x}{}",
+                    glyph.glyph_id,
+                    glyph.cluster,
+                    glyph.advance.to_bits(),
+                    glyph.distance.to_bits(),
+                    glyph.angle.to_bits(),
+                    path_to_svg_data(&glyph.outline),
+                ));
+            }
+            out
+        }
     }
 }
 

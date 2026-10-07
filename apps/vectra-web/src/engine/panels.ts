@@ -678,6 +678,95 @@ export function showsAppearancePanel(
   return !(node.locked ?? false);
 }
 
+// ── Typography (Task 11.0 RULE 1) ──────────────────────────────────────────
+
+/**
+ * **Should the Text panel be on screen?** The same condition as the Appearance
+ * Panel — exactly one unlocked object — narrowed to a run, so the two panels
+ * sit together on a selected word and a slider is never offered over nothing.
+ */
+export function showsTextPanel(
+  snapshot: SnapshotWire | null,
+  selection: readonly string[],
+): boolean {
+  const node = selectedNode(snapshot, selection);
+  return Boolean(node && node.primitive.type === 'text' && !(node.locked ?? false));
+}
+
+/** The families the font picker offers, with the node's own family guaranteed
+ *  to be in the list.
+ *
+ *  The engine's library is the source of truth, but a document can name a
+ *  family this host does not have (that is the whole point of the fallback
+ *  diagnostic). The select must still *show* what the document says, or the
+ *  panel would silently rewrite the designer's choice the moment it opened. */
+export function fontChoices(families: readonly string[], current: string): string[] {
+  const seen = new Set(families);
+  const list = [...families];
+  if (current && !seen.has(current)) list.unshift(current);
+  return list;
+}
+
+/** `true` when a slot is driven by anything but a literal — the panel warns
+ *  before a slider drag overwrites a parametric link (the same contract
+ *  `SnapshotPositionWire`'s `*_source` tags have for the x/y slots). */
+export function isParametricSource(source: string | undefined): boolean {
+  return Boolean(source) && source !== 'literal';
+}
+
+/** The alignment tags, in the order the toggle shows them. */
+export const TEXT_ALIGNMENTS = ['left', 'center', 'right'] as const;
+
+/** The glyph each alignment shows, in its own idiom. */
+export const ALIGNMENT_GLYPH: Record<string, string> = {
+  left: '⯇',
+  center: '⯈⯇',
+  right: '⯈',
+};
+
+/** Where a click on the offset slider lands, in document units.
+ *
+ *  The slider spans `[-track, +track]`, where `track` is the bound path's arc
+ *  length: an offset longer than the path is meaningless (the run would slide
+ *  off the end into the clamped region), and a slider that cannot reach the
+ *  whole path is worse than no slider. The value is **snapped to 0.1 units** —
+ *  a pointer is not a micrometer, and a run that lands on a clean number is a
+ *  run a designer can type. */
+export function offsetFromSlider(
+  fraction: number,
+  arcLength: number,
+  step = 0.1,
+): number {
+  const track = arcLength > 0 ? arcLength : 100;
+  const raw = (Math.max(0, Math.min(1, fraction)) * 2 - 1) * track;
+  return Math.round(raw / step) * step;
+}
+
+/** The slider's position for an offset: the inverse of [`offsetFromSlider`]. */
+export function sliderFromOffset(offset: number, arcLength: number): number {
+  const track = arcLength > 0 ? arcLength : 100;
+  return Math.max(0, Math.min(1, (offset / track + 1) / 2));
+}
+
+/** The offset slider's **track** for a run: the bound path's arc length.
+ *
+ *  The engine already measured it — a bound run's `metrics.width` *is* the
+ *  path's arc length, because that is the window it covers — so the UI reads the
+ *  number it was given instead of measuring the path a second time in
+ *  TypeScript. `0` for a run that is not bound (the slider is not shown) and for
+ *  a path with no length yet. */
+export function boundTrack(node: SnapshotNodeWire | null): number {
+  if (!node || node.primitive.type !== 'text') return 0;
+  if (!node.text?.bound_to) return 0;
+  return node.primitive.width;
+}
+
+/** A family name for the panel's heading: the family as the document spells it,
+ *  with a marker when the engine had to fall back to the bundled face. */
+export function fontLabel(family: string, families: readonly string[]): string {
+  return families.includes(family) ? family : `${family} (substituted)`;
+}
+
 // ── Stack edits (pure: new stack in, no side effects out) ───────────────────
 
 /** Add a fill on top of the stack (RULE 3: fills stack, back → front). */

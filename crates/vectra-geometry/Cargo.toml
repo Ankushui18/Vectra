@@ -11,6 +11,18 @@ vectra-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 lyon.workspace = true
+# Task 11.0 RULE 4: shaping and outlining. `rustybuzz` produces the glyph run
+# (with kerning and every GSUB/GPOS rule the face carries), `ttf-parser`
+# produces the glyph outlines; this crate feeds both into `lyon` paths, and the
+# renderer tessellates those — one geometry pipeline for authored paths and
+# letterforms alike.
+rustybuzz.workspace = true
+ttf-parser.workspace = true
+# Task 12.0 RULE 1: the Region Graph runs the *existing* boolean overlay
+# (`geo::BooleanOps`) over source regions — the same maths Task 4.0's operations
+# use, so a Smart Fill's region and a boolean result can never disagree about
+# where an intersection is.
+geo.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

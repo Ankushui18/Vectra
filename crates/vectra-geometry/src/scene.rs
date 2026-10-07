@@ -51,6 +51,130 @@ pub enum EvaluatedPrimitive {
     /// A built lyon path: fully-resolved points, chained through
     /// [`lyon::path::Builder`]. Iterate with `path.iter()`.
     Path(lyon::path::Path),
+    /// **A laid-out text run** (Task 11.0): the glyphs, outlined.
+    ///
+    /// It carries its own identity rather than degrading into a `Path` for two
+    /// reasons: the run's *metrics* (its advance box) are what a selection
+    /// rectangle, a "fit to artboard" and a text-on-path slider need, and the
+    /// per-glyph outlines are what a future per-glyph animation addresses. What
+    /// it does **not** do is add a second geometry pipeline: every consumer that
+    /// only wants the shape goes through
+    /// [`crate::paths::primitive_to_path`], which hands it
+    /// [`EvaluatedText::outline`] — so tessellation, hit testing, region
+    /// conversion and export all see one path, exactly as they do for a rect.
+    Text(EvaluatedText),
+}
+
+/// One glyph of an evaluated run: its outline in document space, plus the two
+/// numbers that describe where it was put (Task 11.0).
+///
+/// `PartialEq` is **hand-written**: lyon's `Path` carries no `PartialEq`, and
+/// the equality a caller means is over the events — two runs are the same run
+/// iff they draw the same picture, which is what the text laws assert.
+#[derive(Debug, Clone)]
+pub struct EvaluatedGlyph {
+    /// The glyph id inside the face — what a font examiner and the outline
+    /// command's node names read.
+    pub glyph_id: u16,
+    /// Byte offset of the glyph's source character in the run's string. A
+    /// cluster, in Unicode's sense: several glyphs may share one (a ligature, an
+    /// accent), which is why it is not an index into `glyphs`.
+    pub cluster: usize,
+    /// The advance this glyph contributed, in document units.
+    pub advance: f64,
+    /// Where the glyph sits: arc length along the bound path for a run on a
+    /// curve, distance from the origin along the baseline for a straight run.
+    pub distance: f64,
+    /// The glyph's effective rotation in radians (`0` on a straight baseline).
+    /// This is the tangent angle on a bound path, plus the half turn the
+    /// readability pass applies to an otherwise upside-down glyph.
+    pub angle: f64,
+    /// The glyph's contours, in document space, through the layout transform.
+    pub outline: lyon::path::Path,
+}
+
+/// A run's box, in document units: what a selection rectangle and a text-on-path
+/// slider measure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextMetrics {
+    /// The widest line's advance width (a bound run: the path's arc length).
+    pub width: f64,
+    /// First baseline to last descender, lines included.
+    pub height: f64,
+    pub ascender: f64,
+    pub descender: f64,
+    /// Baseline-to-baseline distance, `font_size × line_height`.
+    pub line_advance: f64,
+    pub lines: usize,
+}
+
+/// A laid-out text run (Task 11.0 RULE 1).
+#[derive(Debug, Clone)]
+pub struct EvaluatedText {
+    pub glyphs: Vec<EvaluatedGlyph>,
+    /// How many shaped glyphs did **not** fit on the run's bound path and were
+    /// therefore left out (Task 11.0 RULE 2).
+    ///
+    /// A run longer than its path is truncated, not piled up: the glyphs that
+    /// fit keep their own arc positions and spacing, and this count is what the
+    /// evaluator turns into the `text-overflow` diagnostic — so the designer is
+    /// told the word does not fit instead of being shown a blot at the seam.
+    /// Zero for a straight run, which has no end to run off.
+    pub truncated: usize,
+    /// Every glyph's contours as **one** path — the shape the renderer fills,
+    /// the region engine converts and the SVG exporter writes.
+    pub outline: lyon::path::Path,
+    pub metrics: TextMetrics,
+}
+
+impl EvaluatedText {
+    /// No glyphs: empty text, or a run bound to a path with no direction yet.
+    pub fn empty() -> Self {
+        Self {
+            glyphs: Vec::new(),
+            truncated: 0,
+            outline: lyon::path::Path::builder().build(),
+            metrics: TextMetrics {
+                width: 0.0,
+                height: 0.0,
+                ascender: 0.0,
+                descender: 0.0,
+                line_advance: 0.0,
+                lines: 0,
+            },
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.glyphs.is_empty()
+    }
+}
+
+/// Path equality, event by event: `lyon::path::Path` does not implement
+/// `PartialEq`, and for a *built* path the only meaningful equality is "would
+/// these two draw the same thing" — which is exactly its event sequence.
+fn same_path(a: &lyon::path::Path, b: &lyon::path::Path) -> bool {
+    a.iter().eq(b.iter())
+}
+
+impl PartialEq for EvaluatedGlyph {
+    fn eq(&self, other: &Self) -> bool {
+        self.glyph_id == other.glyph_id
+            && self.cluster == other.cluster
+            && self.advance == other.advance
+            && self.distance == other.distance
+            && self.angle == other.angle
+            && same_path(&self.outline, &other.outline)
+    }
+}
+
+impl PartialEq for EvaluatedText {
+    fn eq(&self, other: &Self) -> bool {
+        self.metrics == other.metrics
+            && self.glyphs == other.glyphs
+            && self.truncated == other.truncated
+            && same_path(&self.outline, &other.outline)
+    }
 }
 
 impl EvaluatedPrimitive {
@@ -61,6 +185,15 @@ impl EvaluatedPrimitive {
             Self::Circle { .. } => "Circle",
             Self::Arc { .. } => "Arc",
             Self::Path(_) => "Path",
+            Self::Text(_) => "Text",
+        }
+    }
+
+    /// How many glyphs a laid-out run holds (0 for every other kind).
+    pub fn glyph_count(&self) -> usize {
+        match self {
+            Self::Text(text) => text.glyphs.len(),
+            _ => 0,
         }
     }
 

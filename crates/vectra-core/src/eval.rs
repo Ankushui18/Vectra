@@ -88,6 +88,49 @@ pub trait ProceduralEvaluator: Send + Sync {
     ) -> Result<Color, ResolveError>;
 }
 
+/// Supplies the **font bytes** a text node's family resolves to (Task 11.0).
+///
+/// The interface is deliberately bytes, not glyphs: `core` knows that a text
+/// node names a family and that shaping needs a face, and nothing more. Shaping,
+/// outlining and layout are `vectra-geometry`'s business (`rustybuzz` +
+/// `ttf-parser`), exactly as path building is — so the font *library* lives
+/// there and this trait is the one word core needs to say about it.
+///
+/// The provider is optional, and an unknown family is not an error: the
+/// evaluator falls back to the bundled face and reports a diagnostic, so a
+/// document whose fonts are missing still draws its words.
+pub trait FontProvider: Send + Sync {
+    /// The raw bytes (TTF/OTF) of `family`, case-insensitively, or `None` if
+    /// this provider does not have it.
+    fn face(&self, family: &str) -> Option<&[u8]>;
+
+    /// The families this provider offers, for the UI's font picker. The default
+    /// (no families) is correct for a provider that only ever answers lookups.
+    fn families(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// A **stable identity** for the bytes `face(family)` returns, when the
+    /// provider can name them (Task 11.0 performance).
+    ///
+    /// `vectra-geometry` memoizes shaped runs — shaping and glyph outlining are
+    /// the expensive half of text, and an `offset` slider must not pay for them
+    /// every frame. A memo has to know *which face* it is remembering, and the
+    /// family name cannot answer that: a host that re-registers a face under a
+    /// name it used before would be served stale outlines. So a provider that
+    /// owns its bytes supplies an id here (the [`FontLibrary`] hashes each face
+    /// once, at registration); one that does not gets the bytes hashed on the
+    /// way in — correct, and merely slower.
+    ///
+    /// The contract is only "same family, same bytes ⟹ same id": two different
+    /// faces must never share an id, and re-registering a face must change it.
+    ///
+    /// [`FontLibrary`]: https://docs.rs/vectra-geometry
+    fn face_id(&self, _family: &str) -> Option<u64> {
+        None
+    }
+}
+
 /// Provides live input values (pointer, viewport, scroll…).
 pub trait InteractionProvider: Send + Sync {
     fn evaluate_float(
@@ -115,6 +158,9 @@ pub struct EvaluationContext<'a> {
     pub motion: Option<&'a dyn MotionEvaluator>,
     pub procedural: Option<&'a dyn ProceduralEvaluator>,
     pub interaction: Option<&'a dyn InteractionProvider>,
+    /// The font bytes text nodes shape against (Task 11.0). `None` is a normal
+    /// state — the evaluator then uses the bundled face for every family.
+    pub fonts: Option<&'a dyn FontProvider>,
 }
 
 impl<'a> EvaluationContext<'a> {
@@ -126,6 +172,7 @@ impl<'a> EvaluationContext<'a> {
             motion: None,
             procedural: None,
             interaction: None,
+            fonts: None,
         }
     }
 
@@ -146,6 +193,13 @@ impl<'a> EvaluationContext<'a> {
 
     pub fn with_interaction(mut self, provider: &'a dyn InteractionProvider) -> Self {
         self.interaction = Some(provider);
+        self
+    }
+
+    /// Install a font library (Task 11.0). Pure plumbing, like the other four
+    /// builders: the context carries the provider, the evaluator asks it.
+    pub fn with_fonts(mut self, fonts: &'a dyn FontProvider) -> Self {
+        self.fonts = Some(fonts);
         self
     }
 

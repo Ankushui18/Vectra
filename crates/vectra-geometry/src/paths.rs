@@ -234,6 +234,35 @@ pub fn build_path(start: Point2, segments: &[ResolvedSegment]) -> Path {
     builder.build()
 }
 
+/// The bounding box of a built path: `(min_x, min_y, max_x, max_y)` in document
+/// units.
+///
+/// Measured with lyon's own iterator rather than from a cached box, so it is
+/// exact for whatever the path holds — including the multi-subpath outline a
+/// text run produces. An empty path yields the degenerate box `(0, 0, 0, 0)`,
+/// which is the box a caller drawing "nothing" should get.
+pub fn path_bounds(path: &Path) -> (f64, f64, f64, f64) {
+    use lyon::path::iterator::PathIterator;
+    let mut min = (f64::INFINITY, f64::INFINITY);
+    let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for event in path.iter().flattened(0.05) {
+        let point = match event {
+            lyon::path::PathEvent::Begin { at } => at,
+            lyon::path::PathEvent::Line { to, .. } => to,
+            lyon::path::PathEvent::End { last, .. } => last,
+            _ => continue,
+        };
+        min.0 = min.0.min(point.x as f64);
+        min.1 = min.1.min(point.y as f64);
+        max.0 = max.0.max(point.x as f64);
+        max.1 = max.1.max(point.y as f64);
+    }
+    if !min.0.is_finite() || !min.1.is_finite() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    (min.0, min.1, max.0, max.1)
+}
+
 #[inline]
 fn to_lyon_point(p: Point2) -> lyon::math::Point {
     // Safe: callers guarantee `is_renderable`, so `as f32` stays finite.
@@ -262,6 +291,13 @@ pub fn primitive_to_path(primitive: &crate::scene::EvaluatedPrimitive) -> Path {
     use crate::scene::EvaluatedPrimitive as P;
     match primitive {
         P::Path(path) => path.clone(),
+        // A run *is* a path once it is laid out: the glyph contours were built
+        // in document space by the shaping pass (`crate::text`), so every
+        // consumer of this function — the renderer's flattener, the region
+        // engine, the exporters — gets a run's letterforms with no special case
+        // of its own. That is what makes RULE 4 hold: the renderer tessellates
+        // text by tessellating a path.
+        P::Text(text) => text.outline.clone(),
         P::Rect {
             x,
             y,
@@ -336,6 +372,116 @@ pub fn primitive_to_path(primitive: &crate::scene::EvaluatedPrimitive) -> Path {
             builder.close();
             builder.build()
         }
+    }
+}
+
+/// **The shape view of a primitive**: the same geometry as
+/// [`primitive_to_path`], but with the analytic curves left *as curves*.
+///
+/// The two functions answer different questions, and the difference matters
+/// exactly once — for text on a path (Task 11.0 RULE 2):
+///
+/// * [`primitive_to_path`] answers *"what polygon does this region fill?"* —
+///   the boolean/region/tessellation view, deliberately polygonized
+///   ([`ARC_SEGMENTS_PER_TAU`]) so `geo` and lyon get a region they can prove
+///   things about.
+/// * This one answers *"which way is the curve going?"* — the view a run needs
+///   when it samples **tangents**. A 64-gon's edge direction jumps by 5.6° at
+///   every vertex no matter how large the circle is, and a run riding one is
+///   visibly kinked; the same circle as four cubic arcs has a tangent that is
+///   continuous and within ~0.02° of the true one.
+///
+/// Only the analytic primitives differ; a `Path` and a run's own outline are
+/// already curves and are cloned as they are.
+pub fn primitive_to_curve_path(primitive: &crate::scene::EvaluatedPrimitive) -> Path {
+    use crate::scene::EvaluatedPrimitive as P;
+    match primitive {
+        // Already curves: a path is the authored path, a run is its glyphs.
+        P::Path(_) | P::Text(_) => primitive_to_path(primitive),
+        P::Circle { cx, cy, r } => {
+            let mut builder = Path::builder();
+            let _ = builder.begin(lyon::math::point((cx + r) as f32, *cy as f32));
+            append_arc(&mut builder, *cx, *cy, *r, 0.0, TAU);
+            builder.close();
+            builder.build()
+        }
+        P::Arc {
+            cx,
+            cy,
+            r,
+            start_angle,
+            end_angle,
+        } => {
+            // An arc primitive is a **wedge** (a pie slice): the straight edges
+            // to the centre are geometry, not scaffolding, so the curve view
+            // keeps them.
+            let mut builder = Path::builder();
+            let _ = builder.begin(lyon::math::point(*cx as f32, *cy as f32));
+            builder.line_to(lyon::math::point(
+                (cx + r * start_angle.cos()) as f32,
+                (cy + r * start_angle.sin()) as f32,
+            ));
+            append_arc(&mut builder, *cx, *cy, *r, *start_angle, *end_angle);
+            builder.close();
+            builder.build()
+        }
+        P::Rect {
+            x,
+            y,
+            w,
+            h,
+            corner_radius,
+        } => {
+            let r = corner_radius.clamp(0.0, 0.5 * w.min(*h));
+            let (x0, y0, x1, y1) = (*x, *y, x + w, y + h);
+            let mut builder = Path::builder();
+            let point = |px: f64, py: f64| lyon::math::point(px as f32, py as f32);
+            let _ = builder.begin(point(x0 + r, y0));
+            builder.line_to(point(x1 - r, y0));
+            append_arc(&mut builder, x1 - r, y0 + r, r, -FRAC_PI_2, 0.0);
+            builder.line_to(point(x1, y1 - r));
+            append_arc(&mut builder, x1 - r, y1 - r, r, 0.0, FRAC_PI_2);
+            builder.line_to(point(x0 + r, y1));
+            append_arc(&mut builder, x0 + r, y1 - r, r, FRAC_PI_2, PI);
+            builder.line_to(point(x0, y0 + r));
+            append_arc(&mut builder, x0 + r, y0 + r, r, PI, 3.0 * FRAC_PI_2);
+            builder.close();
+            builder.build()
+        }
+    }
+}
+
+/// Sweep an arc as **cubic Béziers** (at most a quarter turn each), with the
+/// standard `κ = 4/3 · tan(θ/4)` handle length.
+///
+/// The joins are tangent-continuous and each piece's maximum radial error is
+/// ~0.03% of the radius — for a run that means its tangent comes from the
+/// curve's own direction instead of a chord's.
+fn append_arc(builder: &mut lyon::path::Builder, cx: f64, cy: f64, r: f64, from: f64, to: f64) {
+    let sweep = to - from;
+    let pieces = (sweep.abs() / FRAC_PI_2).ceil().max(1.0) as usize;
+    let step = sweep / pieces as f64;
+    let mut angle = from;
+    for _ in 0..pieces {
+        let next = angle + step;
+        let kappa = 4.0 / 3.0 * (step / 4.0).tan();
+        let start = (cx + r * angle.cos(), cy + r * angle.sin());
+        let end = (cx + r * next.cos(), cy + r * next.sin());
+        // Tangents of the parameterized circle, scaled by κ.
+        let c1 = (
+            start.0 - kappa * r * angle.sin(),
+            start.1 + kappa * r * angle.cos(),
+        );
+        let c2 = (
+            end.0 + kappa * r * next.sin(),
+            end.1 - kappa * r * next.cos(),
+        );
+        builder.cubic_bezier_to(
+            lyon::math::point(c1.0 as f32, c1.1 as f32),
+            lyon::math::point(c2.0 as f32, c2.1 as f32),
+            lyon::math::point(end.0 as f32, end.1 as f32),
+        );
+        angle = next;
     }
 }
 

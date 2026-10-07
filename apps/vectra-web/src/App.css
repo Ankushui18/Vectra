@@ -1452,6 +1452,68 @@ select {
   letter-spacing: 0.04em;
 }
 
+/* ── Task 12.0: the region overlay ─────────────────────────────────────── */
+
+/* The face under the pointer. Translucent, so the geometry that makes it stays
+ * readable *through* the highlight — the designer is choosing among regions, and
+ * a highlight that hid the arrangement would hide the choice. */
+.ov-region {
+  fill: rgba(126, 224, 168, 0.22);
+  stroke: #7ee0a8;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+/* A hole: filled the way the face will be filled is not, and outlined so the
+ * even-odd boundary is visible. */
+.ov-region-hole {
+  fill: rgba(10, 13, 18, 0.55);
+  stroke: #7ee0a8;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+/* A crossing: the point a span can be broken at. */
+.ov-crossing {
+  fill: #ffd479;
+  stroke: #0a0d12;
+  stroke-width: 1;
+}
+
+.ov-region-note {
+  fill: #7ee0a8;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+/* The Region block under the appearance stack: the break button, and one row
+ * per span with its own break — the designer picks one span or all of them. */
+.region-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid rgba(215, 227, 244, 0.12);
+  margin-bottom: 8px;
+}
+.region-block > button {
+  align-self: flex-start;
+}
+
+/* The Region panel's span rows: the button is the row's own action. */
+.span-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+.span-row .span-label {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: 0.85;
+}
+
 /* ── The palette ──────────────────────────────────────────────────────── */
 
 .tool-palette {

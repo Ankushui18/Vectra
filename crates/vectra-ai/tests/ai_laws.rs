@@ -222,6 +222,8 @@ fn the_summary_lists_constraints_and_operations() {
                 radius: vectra_core::Parameter::Literal(4.0),
             },
             inputs: vec![card],
+            style: None,
+            name: None,
         })
         .unwrap();
 

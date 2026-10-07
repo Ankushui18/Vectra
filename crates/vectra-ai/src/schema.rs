@@ -608,6 +608,13 @@ pub(crate) fn created_id(command: &Command) -> Option<String> {
         | Command::ApplyOperation { id, .. }
         | Command::CreateArtboard { id, .. }
         | Command::CreateLayer { id, .. } => Some(id.to_string()),
+        // Task 12.0 RULE 2: a smart fill creates a *virtual* shape whose id is
+        // the one a follow-up command (a `SetAppearances`, say) must be allowed
+        // to name — the same reason `ApplyOperation` is in this list.
+        Command::CreateSmartFill { id, .. } => Some(id.to_string()),
+        // Task 11.0 RULE 3: outlining creates the letterform group (and its
+        // letterforms); the group is what a follow-up command should select.
+        Command::OutlineText { group_id, .. } => Some(group_id.to_string()),
         // A procedural node arrives with its own record, so its id is inside it.
         Command::AddProceduralNode { node } => Some(node.id.to_string()),
         Command::Batch { commands } => commands.iter().find_map(created_id),
@@ -674,6 +681,29 @@ fn referenced_nodes(command: &Command) -> Vec<String> {
         Command::SetNodeVisible { id, .. }
         | Command::SetNodeLocked { id, .. }
         | Command::RenameNode { id, .. } => push(*id),
+        // Task 11.0: a text edit names its run; a binding names the run *and*
+        // the path it follows (both must be in context before it is allowed),
+        // and an outline names the type it replaces plus everything it mints.
+        Command::SetText { node_id, .. }
+        | Command::SetFontFamily { node_id, .. }
+        | Command::SetTextAlignment { node_id, .. }
+        | Command::UnbindTextFromPath { node_id } => push(*node_id),
+        Command::BindTextToPath { node_id, path, .. } => {
+            push(*node_id);
+            push(*path);
+        }
+        Command::OutlineText {
+            node_id,
+            group_id,
+            paths,
+            ..
+        } => {
+            push(*node_id);
+            push(*group_id);
+            for path in paths {
+                push(path.id);
+            }
+        }
         // Task 10.4: a move names two nodes — the one that travels and the group
         // it lands in — and both must be in the AI's context before the command
         // is allowed through, exactly as a rename's id must be. (Since Task 10.5
@@ -731,6 +761,21 @@ fn referenced_nodes(command: &Command) -> Vec<String> {
         Command::ApplyOperation { inputs, .. } => {
             for input in inputs {
                 push(*input);
+            }
+        }
+        // Task 12.0: a region op reads its boundaries (and names itself, which
+        // `created_id` has already allowed); a break reads the path it splits and
+        // mints the pieces, so both ends of the edit are in context.
+        Command::CreateSmartFill { id, boundaries, .. } => {
+            push(*id);
+            for boundary in boundaries {
+                push(*boundary);
+            }
+        }
+        Command::BreakPath { node_id, pieces } => {
+            push(*node_id);
+            for piece in pieces {
+                push(piece.id);
             }
         }
         Command::RemoveOperation { .. } | Command::SetOperationEnabled { .. } => {}

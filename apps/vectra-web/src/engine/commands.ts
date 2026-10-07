@@ -15,6 +15,7 @@ import type {
   ConstraintKindWire,
   MotionTrackWire,
   OperationKindWire,
+  OutlinePathWire,
   ParamValueWire,
   ParameterFloat,
   ParameterPoint,
@@ -22,6 +23,7 @@ import type {
   ProceduralKindWire,
   ProceduralNodeWire,
   StrengthWire,
+  TextAlignmentWire,
 } from './wire';
 import { slotFor, type Axis } from './view-model';
 
@@ -544,6 +546,150 @@ export function setAppearances(nodeId: string, appearances: AppearanceLayerWire[
 
 export function setNodeVisible(id: string, visible: boolean): CommandWire {
   return { type: 'SetNodeVisible', id, visible };
+}
+
+// ── Task 11.0: parametric typography ───────────────────────────────────────
+//
+// The Text tool, the typography inspector and the two text buttons send exactly
+// these builders and nothing else. The *numbers* (`font_size`,
+// `letter_spacing`, `line_height`, `path_offset`) are parameters, so they go
+// through the ordinary `setFloatParam` write and can be bound to a variable or
+// an expression like any other slot — a type-driven composition needs no
+// text-specific plumbing. These builders cover what a parameter cannot carry:
+// a string, a family name, an alignment tag, a binding, and the outline plan.
+
+/** A new text node. `text` starts empty (a caret waiting for a word) unless
+ *  the caller has one; the origin is the first line's baseline start. */
+export function createText(o: {
+  x: number;
+  y: number;
+  text?: string;
+  fontFamily?: string;
+  fontSize?: number;
+  name?: string;
+}): CommandWire {
+  return {
+    type: 'CreateNode',
+    id: crypto.randomUUID(),
+    kind: {
+      Text: {
+        text: o.text ?? '',
+        font_family: o.fontFamily ?? 'Vectra Sans',
+        font_size: lit(o.fontSize ?? 32),
+        letter_spacing: lit(0),
+        line_height: lit(1.2),
+        alignment: 'left',
+        x: lit(o.x),
+        y: lit(o.y),
+      },
+    },
+    ...(o.name ? { name: o.name } : {}),
+  };
+}
+
+/** Rewrite a run's string — the only writer of `text`. */
+export function setText(nodeId: string, text: string): CommandWire {
+  return { type: 'SetText', node_id: nodeId, text };
+}
+
+/** Choose a family. An unknown one is *diagnosed* by the engine (the run falls
+ *  back to the bundled face) rather than refused — the words stay. */
+export function setFontFamily(nodeId: string, family: string): CommandWire {
+  return { type: 'SetFontFamily', node_id: nodeId, family };
+}
+
+export function setTextAlignment(
+  nodeId: string,
+  alignment: TextAlignmentWire,
+): CommandWire {
+  return { type: 'SetTextAlignment', node_id: nodeId, alignment };
+}
+
+/** **Bind to a path** (RULE 2). `offset` is a parameter, so a slider, a
+ *  `$variable` or a spring can slide the run along the curve. */
+export function bindTextToPath(
+  nodeId: string,
+  pathId: string,
+  offset: ParameterFloat = lit(0),
+): CommandWire {
+  return { type: 'BindTextToPath', node_id: nodeId, path: pathId, offset };
+}
+
+/** Unbind: the run returns to its own baseline with every typographic
+ *  property intact. */
+export function unbindTextFromPath(nodeId: string): CommandWire {
+  return { type: 'UnbindTextFromPath', node_id: nodeId };
+}
+
+/** **Outline to paths** (RULE 3), carrying an engine-minted plan.
+ *
+ *  The UI cannot build one itself — shaping lives in `vectra-geometry`, and a
+ *  browser has no font and no glyph ids — so the Outline button goes through
+ *  the boundary's `outline_text`, which shapes the run and dispatches this
+ *  command. The builder exists for the callers that *do* hold a plan (tests,
+ *  the boundary's own dispatch, a future host with its own shaper) and for the
+ *  one invariant that matters: the group id is the caller's, so undo and redo
+ *  address the same nodes. */
+export function outlineTextPlan(o: {
+  nodeId: string;
+  groupId: string;
+  paths: OutlinePathWire[];
+  name?: string;
+}): CommandWire {
+  return {
+    type: 'OutlineText',
+    node_id: o.nodeId,
+    group_id: o.groupId,
+    ...(o.name ? { name: o.name } : {}),
+    paths: o.paths,
+  };
+}
+
+// ── Task 12.0: smart fills and broken paths ───────────────────────────────
+//
+// Two builders, one per rule. Both are *thin* on purpose: the region graph
+// decided everything upstream (which boundaries, which seed, where the cuts
+// are), so this file's job is to spell the decision the way the engine's serde
+// expects and stop.
+
+/**
+ * **A Smart Fill** (RULE 2 + RULE 4): a fill pinned to one region of an
+ * arrangement.
+ *
+ * `boundaries` and `seed` are the node's identity — the paths around the region
+ * and the point inside it — never a copy of the geometry. Move a boundary and
+ * the fill follows, because the engine re-reads the arrangement rather than
+ * redrawing a stored path.
+ *
+ * `fill` is the colour RULE 4 dropped in; omitting it lets the engine's default
+ * stack stand (RULE 2's own appearance stack, with its own fill, stroke and
+ * blend). The id is minted here, like every other node the UI creates.
+ */
+export function createSmartFill(o: {
+  boundaries: string[];
+  seed: [number, number];
+  fill?: ColorWire;
+  name?: string;
+}): CommandWire {
+  return {
+    type: 'CreateSmartFill',
+    id: crypto.randomUUID(),
+    boundaries: o.boundaries,
+    seed: o.seed,
+    ...(o.fill ? { fill: o.fill } : {}),
+    ...(o.name ? { name: o.name } : {}),
+  };
+}
+
+/**
+ * **Did this command make a virtual node?** The Operations panel's question.
+ *
+ * A Smart Fill is not a `CreateNode`: it arrives as its own command, so anything
+ * that wants to know whether the last action produced a region op asks here
+ * rather than listing command types in three places.
+ */
+export function isSmartFill(command: CommandWire): boolean {
+  return command.type === 'CreateSmartFill';
 }
 
 // ── Task 10.7: the "Procreate" layer (gestures, alpha lock, clipping) ──────

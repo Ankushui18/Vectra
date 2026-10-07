@@ -129,6 +129,99 @@ impl PathSegment {
     }
 }
 
+/// Horizontal alignment of each line against the text node's origin (Task 11.0
+/// RULE 1).
+///
+/// Alignment is *structure*, not a number: it chooses which formula the layout
+/// applies to a line's start, so it is an enum the commands carry whole rather
+/// than a `Parameter<f64>` nobody could name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAlign {
+    /// Lines start at the origin (the default, and the one a text cursor means).
+    #[default]
+    Left,
+    /// Lines are centred on the origin.
+    Center,
+    /// Lines end at the origin.
+    Right,
+}
+
+impl TextAlign {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+
+    /// Parse the wire spelling (`"left"`, `"center"`, `"right"`), case-insensitive.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "left" | "start" => Some(Self::Left),
+            "center" | "centre" | "middle" => Some(Self::Center),
+            "right" | "end" => Some(Self::Right),
+            _ => None,
+        }
+    }
+
+    /// Where a line's start sits relative to the node's origin.
+    ///
+    /// The **one** place the three cases are decided, read by the layout engine
+    /// (which offsets every line by it) and by the tests that pin the behaviour:
+    /// `Left` grows rightward from the origin, `Center` grows both ways from it,
+    /// `Right` grows leftward from it. On a path the same offset is measured
+    /// along the curve, which is why it is expressed as a signed distance rather
+    /// than as a box-relative index.
+    pub fn anchor_offset(self, line_width: f64) -> f64 {
+        match self {
+            Self::Left => 0.0,
+            Self::Center => -line_width * 0.5,
+            Self::Right => -line_width,
+        }
+    }
+}
+
+/// **Text on a path** (Task 11.0 RULE 2): the binding that makes a text node
+/// follow another node's geometry.
+///
+/// It is a *reference*, not a copy: the run reads the bound node's evaluated
+/// geometry every pass, so reshaping the circle re-flows the text with it. The
+/// reference is validated at the boundary (`Command::BindTextToPath` accepts only
+/// path-shaped kinds), which is what keeps evaluation a single pass with no
+/// second dependency graph: a text node can never bind to text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextPathBinding {
+    /// The node whose evaluated geometry the run follows: a `Path`, an `Arc` or
+    /// a `Circle`.
+    pub node: NodeId,
+    /// **Arc length** (document units) from the path's start to the run's start:
+    /// the slider that slides the text along the path.
+    pub offset: Parameter<f64>,
+}
+
+impl TextPathBinding {
+    pub fn new(node: NodeId) -> Self {
+        Self {
+            node,
+            offset: Parameter::Literal(0.0),
+        }
+    }
+
+    pub fn with_offset(mut self, offset: Parameter<f64>) -> Self {
+        self.offset = offset;
+        self
+    }
+}
+
+/// The family a text node is born with, and the one the engine can always
+/// resolve: the bundled face in `vectra-geometry`'s asset directory.
+pub const DEFAULT_FONT_FAMILY: &str = "Vectra Sans";
+
+/// Default leading, as a multiple of `font_size` (CSS's reading of the number).
+pub const DEFAULT_LINE_HEIGHT: f64 = 1.2;
+
 /// True mathematical primitive kinds — never bare point arrays (MES §5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
@@ -155,6 +248,36 @@ pub enum NodeKind {
         start: Parameter<Point2>,
         segments: Vec<PathSegment>,
     },
+    /// **Parametric text** (Task 11.0 RULE 1): a string plus the typographic
+    /// controls a designer expects, every number of which is a
+    /// [`Parameter<f64>`] — so a `font_size` bound to a variable or an expression
+    /// re-lays the run out on the very next evaluation, with no "regenerate"
+    /// step and no cached layout to invalidate.
+    ///
+    /// The glyph outlines themselves never live here: `vectra-geometry` shapes
+    /// and outlines the run from the font library, exactly as it builds a
+    /// circle's lyon path from `cx`/`cy`/`radius`. The document stays scalar,
+    /// editable and small.
+    Text {
+        text: String,
+        font_family: String,
+        font_size: Parameter<f64>,
+        /// Extra advance between glyphs, in document units (negative tightens).
+        letter_spacing: Parameter<f64>,
+        /// A **multiple of `font_size`** (CSS's reading of the number), so
+        /// animating the size scales the leading with it instead of collapsing
+        /// the lines together.
+        line_height: Parameter<f64>,
+        alignment: TextAlign,
+        /// Layout origin: the first line's baseline start for `Left`, the
+        /// centre line's centre for `Center`, the line's end for `Right`.
+        x: Parameter<f64>,
+        y: Parameter<f64>,
+        /// **Text on a path** (RULE 2): when present, the run follows the bound
+        /// node's geometry and `x`/`y` are unused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_path: Option<TextPathBinding>,
+    },
     Group {
         children: Vec<NodeId>,
     },
@@ -168,6 +291,7 @@ impl NodeKind {
             Self::Circle { .. } => "Circle",
             Self::Arc { .. } => "Arc",
             Self::Path { .. } => "Path",
+            Self::Text { .. } => "Text",
             Self::Group { .. } => "Group",
         }
     }
@@ -189,8 +313,37 @@ impl NodeKind {
             // always exists — [`Node::path_slots`] enumerates the rest, and
             // [`Node::get_param`] / [`Node::set_param`] address them.
             Self::Path { .. } => &["start"],
+            // A text node's geometry slots are all scalars and all always
+            // present, so the static list is complete. `path_offset` is *not*
+            // listed: it exists only while the node is bound to a path, and a
+            // slot list that named it unconditionally would offer the inspector
+            // a control for a binding that is not there —
+            // [`Node::text_slots`] is the dynamic view that includes it.
+            Self::Text { .. } => &["x", "y", "font_size", "letter_spacing", "line_height"],
             Self::Group { .. } => &[],
         }
+    }
+
+    /// Every addressable slot of a text node, in inspector order — the dynamic
+    /// twin of [`NodeKind::scalar_slots`] (Task 11.0 RULE 1).
+    ///
+    /// The one addition over the static list is `path_offset`, which exists
+    /// exactly when the node is bound to a path: the slider that slides the run
+    /// along the curve is a parameter like every other number here, so it must
+    /// be addressable by `SetParameter`, by the constraint solver and by the UI.
+    pub fn text_slots(&self) -> Vec<String> {
+        let Self::Text { on_path, .. } = self else {
+            return Vec::new();
+        };
+        let mut slots: Vec<String> = self
+            .scalar_slots()
+            .iter()
+            .map(|slot| (*slot).to_string())
+            .collect();
+        if on_path.is_some() {
+            slots.push("path_offset".to_string());
+        }
+        slots
     }
 
     /// Name-only view of a path's slots (the borrow-friendly twin of
@@ -229,7 +382,16 @@ impl NodeKind {
         match self {
             Self::Rectangle { .. } => Some(("x", "y")),
             Self::Circle { .. } | Self::Arc { .. } => Some(("cx", "cy")),
-            Self::Path { .. } | Self::Group { .. } => None,
+            // A text node's origin *is* its position: dragging the word moves
+            // `x`/`y`, which is also what the layout reads as the baseline
+            // start. A bound run has no origin of its own (the path places it),
+            // so it reports none — the same shape of answer `Path` gives.
+            Self::Text { on_path: None, .. } => Some(("x", "y")),
+            Self::Text {
+                on_path: Some(_), ..
+            }
+            | Self::Path { .. }
+            | Self::Group { .. } => None,
         }
     }
 
@@ -250,6 +412,17 @@ impl NodeKind {
                 "r" => "radius".to_string(),
                 "start" => "start_angle".to_string(),
                 "end" => "end_angle".to_string(),
+                other => other.to_string(),
+            },
+            // Typographic aliases a designer (or an AI planner) reaches for:
+            // `size` for the em size, `tracking` for letter spacing, `leading`
+            // for the line multiple. They all land on the canonical slot, so the
+            // solver interns one variable per property rather than two.
+            Self::Text { .. } => match property {
+                "size" => "font_size".to_string(),
+                "tracking" | "spacing" => "letter_spacing".to_string(),
+                "leading" => "line_height".to_string(),
+                "offset" => "path_offset".to_string(),
                 other => other.to_string(),
             },
             Self::Path { .. } | Self::Group { .. } => property.to_string(),
@@ -281,6 +454,25 @@ impl NodeKind {
             radius: Parameter::Literal(radius),
             start_angle: Parameter::Literal(start_angle),
             end_angle: Parameter::Literal(end_angle),
+        }
+    }
+
+    /// A text node at `(x, y)` — the first line's baseline start (Task 11.0).
+    ///
+    /// The family defaults to [`DEFAULT_FONT_FAMILY`], which the engine can
+    /// always resolve: text is never born unresolvable, whatever the host's
+    /// system fonts look like.
+    pub fn text(x: f64, y: f64, text: impl Into<String>, font_size: f64) -> Self {
+        Self::Text {
+            text: text.into(),
+            font_family: DEFAULT_FONT_FAMILY.to_string(),
+            font_size: Parameter::Literal(font_size),
+            letter_spacing: Parameter::Literal(0.0),
+            line_height: Parameter::Literal(DEFAULT_LINE_HEIGHT),
+            alignment: TextAlign::Left,
+            x: Parameter::Literal(x),
+            y: Parameter::Literal(y),
+            on_path: None,
         }
     }
 }
@@ -685,6 +877,34 @@ impl Node {
                 "end_angle" | "end" => Ok(ParamValue::Float(end_angle.clone())),
                 _ => Err(self.unknown_property(property)),
             },
+            // `text`, `font_family` and `alignment` are deliberately **not**
+            // addressable here: they are a string, a string and an enum, and
+            // `ParamValue` speaks numbers, colours and points. They are written
+            // by their own commands (`SetText`, `SetFontFamily`,
+            // `SetTextAlignment`) and read by the snapshot — exactly the
+            // arrangement `name` already has.
+            NodeKind::Text {
+                font_size,
+                letter_spacing,
+                line_height,
+                x,
+                y,
+                on_path,
+                ..
+            } => match property {
+                "x" => Ok(ParamValue::Float(x.clone())),
+                "y" => Ok(ParamValue::Float(y.clone())),
+                "font_size" | "size" => Ok(ParamValue::Float(font_size.clone())),
+                "letter_spacing" | "tracking" | "spacing" => {
+                    Ok(ParamValue::Float(letter_spacing.clone()))
+                }
+                "line_height" | "leading" => Ok(ParamValue::Float(line_height.clone())),
+                "path_offset" | "offset" => match on_path {
+                    Some(binding) => Ok(ParamValue::Float(binding.offset.clone())),
+                    None => Err(self.unknown_property(property)),
+                },
+                _ => Err(self.unknown_property(property)),
+            },
             // Paths have a *dynamic* slot space (Task 10.1): `start` plus every
             // segment endpoint, addressed with the evaluator's own spelling.
             // Unknown names inside a valid shape (`segments[0].control1` on a
@@ -835,6 +1055,35 @@ impl Node {
                 let v = expect_float(property, value)?;
                 Ok(ParamValue::Float(std::mem::replace(slot, v)))
             }
+            NodeKind::Text {
+                font_size,
+                letter_spacing,
+                line_height,
+                x,
+                y,
+                on_path,
+                ..
+            } => {
+                // `path_offset` is the one slot whose existence depends on the
+                // binding, and writing it *through* the binding is what makes
+                // the offset animatable without the binding being rewritten:
+                // `$slide` bound to `text.path_offset` re-flows the run along
+                // the curve on every evaluation.
+                let slot = match property {
+                    "x" => x,
+                    "y" => y,
+                    "font_size" | "size" => font_size,
+                    "letter_spacing" | "tracking" | "spacing" => letter_spacing,
+                    "line_height" | "leading" => line_height,
+                    "path_offset" | "offset" => match on_path {
+                        Some(binding) => &mut binding.offset,
+                        None => return Err(self.unknown_property(property)),
+                    },
+                    _ => return Err(self.unknown_property(property)),
+                };
+                let v = expect_float(property, value)?;
+                Ok(ParamValue::Float(std::mem::replace(slot, v)))
+            }
             NodeKind::Path { .. } => match value {
                 // A component write is a write *through* the point slot: the
                 // previous value comes back as the scalar it replaced, so the
@@ -938,6 +1187,33 @@ impl Node {
                     ("end_angle", end_angle),
                 ] {
                     visit(name, param);
+                }
+            }
+            // A text node's five always-present scalars, plus the binding's
+            // offset when it has one. The offset is visited under its own name
+            // because that is what `get_param`/`set_param` call it: a dependency
+            // edge, a `SetParameter` write and an inspector row must all address
+            // the same slot or the graph would guard a name nothing writes.
+            NodeKind::Text {
+                font_size,
+                letter_spacing,
+                line_height,
+                x,
+                y,
+                on_path,
+                ..
+            } => {
+                for (name, param) in [
+                    ("x", x),
+                    ("y", y),
+                    ("font_size", font_size),
+                    ("letter_spacing", letter_spacing),
+                    ("line_height", line_height),
+                ] {
+                    visit(name, param);
+                }
+                if let Some(binding) = on_path {
+                    visit("path_offset", &binding.offset);
                 }
             }
             // Path geometry is `Parameter<Point2>`-only and groups are
@@ -1436,6 +1712,55 @@ impl Document {
         self.nodes.contains_key(&id)
             || self.operations.get(id).is_some_and(|op| op.enabled)
             || self.procedural.is_geometry_id(id)
+    }
+
+    /// True ⟺ a node of this kind can be the geometry a text run follows
+    /// (Task 11.0 RULE 2): a `Path`, an `Arc` or a `Circle`.
+    ///
+    /// The restriction is load-bearing rather than cosmetic. Evaluation is a
+    /// single pass over the document, so a text node may only bind to geometry
+    /// that is resolvable *from its own parameters* — never to another text
+    /// node, and never to a procedural or operation result whose evaluation
+    /// order this pass does not control. `Command::BindTextToPath` enforces
+    /// exactly this list, so no document can hold a binding the evaluator
+    /// cannot honor.
+    pub fn is_text_path_source(kind: &NodeKind) -> bool {
+        matches!(
+            kind,
+            NodeKind::Path { .. } | NodeKind::Arc { .. } | NodeKind::Circle { .. }
+        )
+    }
+
+    /// Every text node bound to one of `ids` (Task 11.0 RULE 2) — the
+    /// **propagation step** that makes reshaping a path re-flow the run on it.
+    ///
+    /// A binding is a geometry-to-geometry reference, and the dependency graph
+    /// is a graph of *slots* (`GraphNode::GeometryProperty`), so there is no
+    /// edge kind that could express it — exactly the situation the operations
+    /// pass and the procedural `Source` pass are in. They answer it the same
+    /// way: a registry scan seeded by the dirty set
+    /// (`OperationRegistry::affected_by`, `sources_referencing`). This is that
+    /// scan for text: O(nodes), one pointer comparison each, and an empty
+    /// result costs one length check.
+    pub fn text_nodes_bound_to(&self, ids: &[NodeId]) -> Vec<NodeId> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let mut bound: Vec<NodeId> = self
+            .nodes
+            .values()
+            .filter(|node| match &node.kind {
+                NodeKind::Text {
+                    on_path: Some(binding),
+                    ..
+                } => ids.contains(&binding.node),
+                _ => false,
+            })
+            .map(|node| node.id)
+            .collect();
+        bound.sort();
+        bound.dedup();
+        bound
     }
 
     /// Every node whose parameters read one of `outputs` — the readers the
@@ -2102,6 +2427,47 @@ impl Document {
         }
         self.resync_order_from_layers();
         previous
+    }
+
+    /// Put a **whole block** (a node and everything under it) into `layer`
+    /// immediately above `anchor`, keeping the block's internal draw order.
+    ///
+    /// [`Document::assign_to_layer`] appends, which is right for *new* artwork —
+    /// it is the newest thing in the document — and wrong for a derived node: an
+    /// outline (Task 11.0 RULE 3) has to appear **where the type it replaces
+    /// was**, or everything that was above the type would suddenly be under the
+    /// letterforms, and a designer's stacking would change just for outlining.
+    ///
+    /// No-op when the layer is gone; a document with no layers needs none of
+    /// this, because its flat order is already the placement.
+    pub fn assign_block_above(&mut self, block: &[NodeId], layer: LayerId, anchor: NodeId) {
+        if self.layers.get(&layer).is_none() || block.is_empty() {
+            return;
+        }
+        // Where the anchor's run ends, read **before** the block is taken out:
+        // the block may be sitting in this very list, and removing it first
+        // would shift the anchor's own position.
+        let at = self
+            .layers
+            .get(&layer)
+            .and_then(|record| self.run_end(&record.children, anchor))
+            .unwrap_or_else(|| {
+                self.layers
+                    .get(&layer)
+                    .map(|record| record.children.len())
+                    .unwrap_or(0)
+            });
+        for member in block {
+            self.layers.detach(*member);
+        }
+        if let Some(record) = self.layers.get_mut(&layer) {
+            let at = at.min(record.children.len());
+            for (offset, member) in block.iter().enumerate() {
+                let position = (at + offset).min(record.children.len());
+                record.children.insert(position, *member);
+            }
+        }
+        self.resync_order_from_layers();
     }
 
     /// Assign a node to the **active** layer, if the document has one. Used by

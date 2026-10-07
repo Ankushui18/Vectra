@@ -181,10 +181,15 @@ pub fn prose_for(commands: &[Command]) -> String {
     let mut shapes = 0usize;
     let mut artboards = 0usize;
     let mut procedural = 0usize;
+    let mut smart_fills = 0usize;
     let mut other = 0usize;
     let mut visit = |command: &Command| match command {
         Command::AddConstraint { .. } => constraints += 1,
         Command::ApplyOperation { .. } => boolean_ops += 1,
+        // A region op is not a boolean but it *is* the family's idiom — "the
+        // engine derived a shape from the ones around it" — so it gets a
+        // sentence of its own rather than falling into `other`.
+        Command::CreateSmartFill { .. } => smart_fills += 1,
         Command::CreateComponent { .. } => components += 1,
         Command::InstantiateComponent { .. } => instances += 1,
         Command::DuplicateNode { .. } => duplicates += 1,
@@ -229,6 +234,13 @@ pub fn prose_for(commands: &[Command]) -> String {
             "unified the shape".to_string()
         } else {
             format!("unified {boolean_ops} shapes")
+        });
+    }
+    if smart_fills > 0 {
+        parts.push(if smart_fills == 1 {
+            "filled the enclosed region".to_string()
+        } else {
+            format!("filled {smart_fills} enclosed regions")
         });
     }
     if components > 0 {

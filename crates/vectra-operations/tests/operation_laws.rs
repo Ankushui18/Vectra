@@ -86,7 +86,10 @@ impl Harness {
     fn apply(&mut self, kind: OperationKind, inputs: Vec<NodeId>) -> OperationId {
         let id = new_operation_id();
         self.engine
-            .dispatch(Command::ApplyOperation { id, kind, inputs })
+            .dispatch(Command::ApplyOperation { id, kind, inputs,
+            style: None,
+            name: None,
+        })
             .expect("apply operation");
         self.refresh();
         id
@@ -547,7 +550,9 @@ fn arity_and_missing_inputs_are_rejected_before_anything_is_stored() {
                     op: BooleanOp::Union,
                 },
                 inputs,
-            })
+            style: None,
+            name: None,
+        })
             .expect_err("arity violation");
         assert!(error.is_operation_error(), "{error}");
     }
@@ -560,6 +565,8 @@ fn arity_and_missing_inputs_are_rejected_before_anything_is_stored() {
                 distance: Parameter::Literal(1.0),
             },
             inputs: vec![a, b],
+            style: None,
+            name: None,
         })
         .expect_err("arity violation");
     assert!(error.is_operation_error(), "{error}");
@@ -573,6 +580,8 @@ fn arity_and_missing_inputs_are_rejected_before_anything_is_stored() {
                 radius: Parameter::Literal(1.0),
             },
             inputs: vec![vectra_core::new_node_id()],
+            style: None,
+            name: None,
         })
         .expect_err("unknown input");
     assert!(
@@ -592,6 +601,8 @@ fn arity_and_missing_inputs_are_rejected_before_anything_is_stored() {
                 op: BooleanOp::Union,
             },
             inputs: vec![vectra_core::new_node_id()],
+            style: None,
+            name: None,
         })
         .expect_err("arity violation");
     assert!(error.is_operation_error(), "{error}");

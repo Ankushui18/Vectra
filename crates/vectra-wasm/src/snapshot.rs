@@ -25,7 +25,9 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use vectra_constraints::SolverStats;
 use vectra_core::layers::ArtboardRecord;
-use vectra_core::{ids::LayerId, Constraint, Engine};
+use vectra_core::{ids::LayerId, Constraint, Engine, NodeId};
+#[cfg(test)]
+use vectra_core::{NodeKind, Resolvable};
 use vectra_dependency::GraphSummary;
 use vectra_geometry::{
     path_to_svg_data, Diagnostic, EvaluatedAppearance, EvaluatedPaint, EvaluatedPrimitive,
@@ -59,6 +61,18 @@ pub enum SnapshotPrimitive {
     },
     Path {
         d: String,
+    },
+    /// **A laid-out run** (Task 11.0). Geometry crosses as `d` — the glyph
+    /// contours, exactly what the renderer fills — plus the run's own numbers,
+    /// because a text node is the one primitive whose *box* is not derivable
+    /// from its shape (the box is the advance area a selection rectangle and a
+    /// "slide along the path" gutter are drawn from).
+    Text {
+        d: String,
+        glyphs: usize,
+        width: f64,
+        height: f64,
+        lines: usize,
     },
 }
 
@@ -98,6 +112,13 @@ impl From<&EvaluatedPrimitive> for SnapshotPrimitive {
             },
             EvaluatedPrimitive::Path(path) => Self::Path {
                 d: path_to_svg_data(path),
+            },
+            EvaluatedPrimitive::Text(text) => Self::Text {
+                d: path_to_svg_data(&text.outline),
+                glyphs: text.glyphs.len(),
+                width: text.metrics.width,
+                height: text.metrics.height,
+                lines: text.metrics.lines,
             },
         }
     }
@@ -264,6 +285,36 @@ pub struct SnapshotNode {
     /// The layer's name, so the row reads `Layer — Node` without the panel
     /// joining two lists by hand.
     pub layer_name: Option<String>,
+    /// The Text panel's row (Task 11.0): present exactly for a text node.
+    /// `None` on every other kind, which is also the UI's "show the typography
+    /// inspector?" test — the same convention as `position` above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<SnapshotText>,
+}
+
+/// Everything the typography inspector edits, plus how each number is driven.
+///
+/// The four parametric slots carry their resolved value **and** their
+/// [`vectra_core::Parameter::source_tag`], so the panel can warn before a
+/// slider drag breaks a `$variable` or a spring — the exact contract
+/// `SnapshotPosition` has for the x/y slots, extended to type.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SnapshotText {
+    pub text: String,
+    pub font_family: String,
+    /// `Left` / `Center` / `Right` — [`vectra_core::TextAlign::tag`].
+    pub alignment: String,
+    pub font_size: f64,
+    pub font_size_source: String,
+    pub letter_spacing: f64,
+    pub letter_spacing_source: String,
+    pub line_height: f64,
+    pub line_height_source: String,
+    /// The bound path's node id when the run follows a curve (RULE 2).
+    pub bound_to: Option<String>,
+    /// The bound run's arc-length offset (`path_offset`), when bound.
+    pub offset: Option<f64>,
+    pub offset_source: Option<String>,
 }
 
 /// The canonical position of a node plus how each slot is sourced.
@@ -283,6 +334,10 @@ pub struct SnapshotScene {
     /// Sorted by id — see the module docs on canonical ordering.
     pub nodes: BTreeMap<String, SnapshotNode>,
     pub z_order: Vec<String>,
+    /// The families the host's font library can resolve, sorted — the Text
+    /// panel's font picker. The bundled family is always in the list, so the
+    /// control is never empty.
+    pub fonts: Vec<String>,
 }
 
 /// One row of the Layers Panel (Task 10.2 RULE 1).
@@ -419,6 +474,12 @@ pub struct SnapshotInputs<'a> {
     /// Canonical positions by node id (Task 3.2), precomputed by the engine
     /// owner because resolving them needs the compiled expression registry.
     pub positions: &'a BTreeMap<String, SnapshotPosition>,
+    /// Text-panel rows by node id (Task 11.0), precomputed by the engine owner
+    /// for the same reason: resolving the four type slots needs the compiled
+    /// registries.
+    pub texts: &'a BTreeMap<String, SnapshotText>,
+    /// Families the host's font library answers to, sorted (the picker).
+    pub fonts: Vec<String>,
     /// Counters from the last solver pass, plus the live gesture state.
     pub solver: SnapshotSolver,
     pub stats: vectra_dependency::EvalStats,
@@ -505,6 +566,91 @@ pub struct SnapshotOperation {
     pub enabled: bool,
 }
 
+/// **The Smart Fill plan** (Task 12.0 RULES 1, 3 and 4): the region graph of a
+/// set of nodes, as the UI reads it.
+///
+/// One shape for three consumers, because they are all asking the same
+/// question — *which faces do these paths make?*
+///
+/// * the **Smart Fill tool** hovers a face (`regions[].path` is the highlight);
+/// * **ColorDrop** drops into a face and creates a fill with the dropped paint;
+/// * the **Region panel** lists the crossings and each boundary's spans, and
+///   offers "break this span".
+///
+/// The numbers are the engine's: areas, arc lengths and bounds are computed in
+/// `vectra-geometry` and formatted nowhere in the UI, the same rule every other
+/// panel in this workspace follows.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RegionPlanWire {
+    /// The shapes that took part, in the order the caller named them — the
+    /// order every face signature below is stated in. A group in the caller's
+    /// list is *expanded* to the shapes it holds (a group is a selection, not a
+    /// boundary).
+    pub sources: Vec<PlanSourceWire>,
+    /// The faces, smallest-last within equal signatures: each one is a closed
+    /// region path the tool can highlight or a fill can adopt.
+    pub regions: Vec<PlanRegionWire>,
+    /// The intersection points themselves, for the overlay's markers.
+    pub crossings: Vec<[f64; 2]>,
+    /// The face the caller's probe point fell in, when it passed one: the
+    /// tool's hover target, and RULE 4's "which region was this dropped in".
+    pub hit: Option<usize>,
+}
+
+/// One boundary path in a plan.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanSourceWire {
+    pub id: String,
+    pub name: String,
+    /// The shape's own area, in document units².
+    pub area: f64,
+    /// `[min_x, min_y, max_x, max_y]`, for framing and for the overlay's bbox.
+    pub bounds: [f64; 4],
+    /// The arcs between this path's intersection points. Empty when nothing
+    /// crosses it: there is no point to break at, so there is no span.
+    pub spans: Vec<PlanSpanWire>,
+}
+
+/// One span: an arc of a boundary's outline between two crossings.
+///
+/// `from`/`to` are arc lengths along the **whole outline** (all the path's
+/// rings, in path order), which is exactly what `break_path` takes back — the
+/// UI echoes the numbers it was given rather than computing cut positions.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanSpanWire {
+    /// Position in this source's `spans` — the panel's row key.
+    pub index: usize,
+    pub from: f64,
+    pub to: f64,
+    /// Which subpath (ring) of the source the span is on.
+    pub ring: usize,
+    pub start: [f64; 2],
+    pub end: [f64; 2],
+    pub length: f64,
+    /// The source's total outline length, so the panel can draw the span's
+    /// position as a fraction without a second call.
+    pub total: f64,
+}
+
+/// One face of the arrangement.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanRegionWire {
+    pub index: usize,
+    pub area: f64,
+    /// How many holes the face has (a Smart Fill inside an "O" has one).
+    pub holes: usize,
+    /// The ids of the sources this face is inside, in plan order — its
+    /// signature. A face is inside at least one source, by construction.
+    pub members: Vec<String>,
+    /// The face as SVG path data: the canonical "clean closed Path" of RULE 1,
+    /// and what the geometry is when the fill is finally created.
+    pub path: String,
+    /// The same face as document-space rings (exterior first, then holes), for
+    /// an overlay that maps coordinates through the renderer's camera rather
+    /// than parsing path data of its own.
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
 /// A procedural node (Task 7.0), keyed by id. Its *geometry* is in `scene` as a
 /// standard evaluated node (RULE 4 — the same id space, so the inspector, the
 /// dependency view and the renderer need no special case); this is the panel's
@@ -539,14 +685,22 @@ pub struct SnapshotProceduralPort {
 
 impl SnapshotOperation {
     fn from_operation(op: &vectra_core::OperationNode, doc: &vectra_core::Document) -> Self {
+        // The panel lists the shapes the operation **reads**. For a Smart Fill
+        // that is the kind's boundaries, not `inputs[0]` — `inputs[0]` is the
+        // fill's own id (the seed carrier `arity()` counts), and a row printing
+        // a node its own id reads as a bug rather than as a design.
+        let shapes: Vec<NodeId> = if op.kind.boundaries().is_empty() {
+            op.inputs.clone()
+        } else {
+            op.kind.boundaries().to_vec()
+        };
         Self {
             id: op.id.to_string(),
             name: op.name.clone(),
             kind: op.kind.tag().to_string(),
             description: op.kind.describe(),
-            inputs: op.inputs.iter().map(ToString::to_string).collect(),
-            input_names: op
-                .inputs
+            inputs: shapes.iter().map(ToString::to_string).collect(),
+            input_names: shapes
                 .iter()
                 .map(|id| {
                     doc.nodes
@@ -668,7 +822,7 @@ pub fn build_snapshot(inputs: SnapshotInputs<'_>) -> SnapshotResponse {
         let own = doc.nodes.get(id);
         let listed = doc.layers.layer_of(*id).map(|(layer, _)| layer);
         nodes.insert(
-            key,
+            key.clone(),
             SnapshotNode {
                 id: id.to_string(),
                 name,
@@ -683,6 +837,7 @@ pub fn build_snapshot(inputs: SnapshotInputs<'_>) -> SnapshotResponse {
                 own_locked: own.map(|node| node.locked).unwrap_or(false),
                 layer: listed.map(|layer| layer.id.to_string()),
                 layer_name: listed.map(|layer| layer.name.clone()),
+                text: inputs.texts.get(&key).cloned(),
             },
         );
     }
@@ -778,6 +933,7 @@ pub fn build_snapshot(inputs: SnapshotInputs<'_>) -> SnapshotResponse {
             .iter()
             .map(ToString::to_string)
             .collect(),
+        fonts: inputs.fonts,
     };
 
     SnapshotResponse::Ok {
@@ -907,6 +1063,73 @@ fn sorted_diagnostics(
     out
 }
 
+/// **Test-only** twin of the live engine's text rows (`WasmEngine::texts`): the
+/// same projection, built from a plain [`Engine`]'s document and context, so a
+/// native test can assert what the typography panel would be handed.
+///
+/// It is a *duplicate* on purpose — the live one resolves through the engine's
+/// compiled registries (expressions, motion, procedural, fonts), which a bare
+/// `Engine` in a test does not have — and it is small enough that keeping the
+/// two readable side by side beats threading a trait through the engine for the
+/// benefit of assertions.
+#[cfg(test)]
+pub fn snapshot_texts(
+    doc: &vectra_core::Document,
+    ctx: &vectra_core::EvaluationContext,
+    scene: &vectra_geometry::EvaluatedScene,
+) -> BTreeMap<String, SnapshotText> {
+    let _ = scene;
+    let mut texts = BTreeMap::new();
+    for (id, node) in &doc.nodes {
+        let NodeKind::Text {
+            text,
+            font_family,
+            font_size,
+            letter_spacing,
+            line_height,
+            alignment,
+            on_path,
+            ..
+        } = &node.kind
+        else {
+            continue;
+        };
+        let (Ok(size), Ok(spacing), Ok(leading)) = (
+            font_size.resolve(ctx),
+            letter_spacing.resolve(ctx),
+            line_height.resolve(ctx),
+        ) else {
+            continue;
+        };
+        let (bound_to, offset, offset_source) = match on_path {
+            Some(binding) => (
+                Some(binding.node.to_string()),
+                binding.offset.resolve(ctx).ok(),
+                Some(binding.offset.source_tag().to_string()),
+            ),
+            None => (None, None, None),
+        };
+        texts.insert(
+            id.to_string(),
+            SnapshotText {
+                text: text.clone(),
+                font_family: font_family.clone(),
+                alignment: alignment.tag().to_string(),
+                font_size: size,
+                font_size_source: font_size.source_tag().to_string(),
+                letter_spacing: spacing,
+                letter_spacing_source: letter_spacing.source_tag().to_string(),
+                line_height: leading,
+                line_height_source: line_height.source_tag().to_string(),
+                bound_to,
+                offset,
+                offset_source,
+            },
+        );
+    }
+    texts
+}
+
 /// Test convenience: evaluate a plain [`Engine`] fully, then project. The WASM
 /// engine never uses this path — it always projects its incremental cache.
 #[cfg(test)]
@@ -916,12 +1139,15 @@ pub fn build_snapshot_native(
 ) -> SnapshotResponse {
     let evaluation = vectra_geometry::GeometryEvaluator.evaluate_full(engine.document(), ctx);
     let positions = BTreeMap::new();
+    let texts = snapshot_texts(engine.document(), ctx, &evaluation.scene);
     build_snapshot(SnapshotInputs {
         engine,
         scene: &evaluation.scene,
         diagnostics: &evaluation.diagnostics,
         solver_diagnostics: &[],
         positions: &positions,
+        texts: &texts,
+        fonts: Vec::new(),
         solver: SnapshotSolver::from_stats(SolverStats::default(), None),
         stats: vectra_dependency::EvalStats::default(),
         published: &BTreeMap::new(),

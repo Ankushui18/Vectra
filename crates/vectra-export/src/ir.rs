@@ -473,6 +473,27 @@ fn geometry_of(
             };
             (geometry, primitive_bounds_of(primitive))
         }
+        // **Text (Task 11.0).** A run exports as what it is drawn as: its glyph
+        // outlines, as one `<path>`. Outlining on the way out — rather than
+        // writing `<text>` with a font reference — is what makes an exported
+        // file render identically everywhere, with no font installed and no
+        // substitution: the letterforms travel inside the SVG. A designer who
+        // wants live, editable text in the export runs `OutlineText` first,
+        // which is the same non-destructive operation the canvas offers.
+        NodeKind::Text { .. } => {
+            let d = resolved.and_then(|node| match &node.primitive {
+                EvaluatedPrimitive::Path(path) => Some(path_to_svg_data(path)),
+                EvaluatedPrimitive::Text(text) => Some(path_to_svg_data(&text.outline)),
+                _ => None,
+            });
+            if d.is_none() {
+                warnings.push(format!(
+                    "text `{}` has no resolved geometry; exported without `d`",
+                    node.name
+                ));
+            }
+            (ExportGeometry::Path { d }, primitive_bounds_of(primitive))
+        }
         NodeKind::Path { start, segments } => {
             let d = resolved.and_then(|node| match &node.primitive {
                 EvaluatedPrimitive::Path(path) => Some(path_to_svg_data(path)),
@@ -820,22 +841,33 @@ fn primitive_bounds(primitive: &EvaluatedPrimitive) -> Option<ExportBounds> {
             start_angle,
             end_angle,
         } => arc_bounds(*cx, *cy, *r, *start_angle, *end_angle),
-        EvaluatedPrimitive::Path(path) => {
-            let mut bounds: Option<ExportBounds> = None;
-            for event in path.iter() {
-                for point in event_points(&event) {
-                    let box_ = ExportBounds {
-                        min_x: point.x,
-                        min_y: point.y,
-                        max_x: point.x,
-                        max_y: point.y,
-                    };
-                    bounds = Some(bounds.map_or(box_, |b| b.union(box_)));
-                }
-            }
-            bounds
+        // A path and a run both measure their letterform/curve points; a run's
+        // box is exactly its glyphs' box — the same measurement the renderer's
+        // culling and the exporter's viewBox need.
+        EvaluatedPrimitive::Path(_) | EvaluatedPrimitive::Text(_) => outline_bounds(primitive),
+    }
+}
+
+/// The union of every point of a node's outline geometry.
+fn outline_bounds(primitive: &EvaluatedPrimitive) -> Option<ExportBounds> {
+    let path = match primitive {
+        EvaluatedPrimitive::Path(path) => path,
+        EvaluatedPrimitive::Text(text) => &text.outline,
+        _ => return None,
+    };
+    let mut bounds: Option<ExportBounds> = None;
+    for event in path.iter() {
+        for point in event_points(&event) {
+            let box_ = ExportBounds {
+                min_x: point.x,
+                min_y: point.y,
+                max_x: point.x,
+                max_y: point.y,
+            };
+            bounds = Some(bounds.map_or(box_, |b| b.union(box_)));
         }
     }
+    bounds
 }
 
 /// Every point an event contributes to a bounding box. Control points are

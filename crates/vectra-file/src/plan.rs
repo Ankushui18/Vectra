@@ -164,6 +164,8 @@ pub fn replay(document: &Document) -> Replay {
             id: operation.id,
             kind: operation.kind.clone(),
             inputs: operation.inputs.clone(),
+            style: None,
+            name: None,
         });
         if !operation.enabled {
             commands.push(Command::SetOperationEnabled {

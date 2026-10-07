@@ -6,7 +6,7 @@
 //! remote control; the engine owns all mutation.
 
 use crate::constraint::Constraint;
-use crate::document::{Document, MotionTrack, Node, NodeKind, PathSegment};
+use crate::document::{Document, MotionTrack, Node, NodeKind, PathSegment, TextAlign};
 use crate::error::VectraError;
 use crate::geom::{Color, Point2};
 use crate::ids::{
@@ -17,6 +17,7 @@ use crate::layers::LayerRecord;
 use crate::operation::{OperationKind, OperationNode};
 use crate::param::{MotionBinding, NodeOutputId, ParamValue, Parameter};
 use crate::procedural::ProceduralNode;
+use crate::document::StyleProperties;
 use crate::style::AppearanceLayer;
 use serde::{Deserialize, Serialize};
 
@@ -121,6 +122,20 @@ pub enum Command {
         id: OperationId,
         kind: OperationKind,
         inputs: Vec<NodeId>,
+        /// The record's paint, when the caller has one to restore (Task 12.0).
+        ///
+        /// `RemoveOperation` is undone by re-applying this command, and a
+        /// Smart Fill is *created with a colour* (RULE 4's drop) — so an inverse
+        /// that rebuilt the operation from its kind alone would redo a red fill
+        /// as the default orange. Omitted by callers that only mean "make this
+        /// operation exist", which is why it is `Option` and `#[serde(default)]`
+        /// rather than a required field: the wire shape Task 4.0 shipped stays
+        /// valid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<StyleProperties>,
+        /// The record's display name, on the same terms as `style`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Withdraw an operation. The inputs live on exactly as they were (RULE 1);
     /// only the virtual result disappears.
@@ -133,6 +148,42 @@ pub enum Command {
     SetOperationEnabled {
         id: OperationId,
         enabled: bool,
+    },
+    /// **Create a Smart Fill** (Task 12.0 RULES 2 and 4): a parametric region
+    /// pinned between `boundaries`, at the face under `seed`.
+    ///
+    /// The boundaries are ordinary node ids and **nothing about them is
+    /// edited** — the fill reads their evaluated geometry, exactly as
+    /// [`Command::ApplyOperation`]'s boolean reads its operands. That is what
+    /// makes it parametric: move a boundary and the dirty set reaches the fill's
+    /// `inputs`, so the pass recomputes the region and the fill follows.
+    ///
+    /// `fill` is RULE 4: a ColorDrop arrives here with the colour that was
+    /// dropped, so the drop *creates* paint rather than rewriting the boundary's
+    /// style. Omitted (a click with the Smart Fill tool, or an AI request) the
+    /// fill takes the operations registry's own default.
+    CreateSmartFill {
+        id: OperationId,
+        boundaries: Vec<NodeId>,
+        seed: (f64, f64),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<Color>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// **Break a path at its intersection points** (Task 12.0 RULE 3).
+    ///
+    /// The pieces travel with the command — exactly like [`Command::OutlineText`]'s
+    /// letterforms, and for the same reason: computing them needs *resolved*
+    /// geometry (any point slot may be a variable or an expression), and
+    /// [`Command::apply`] has no evaluation context. The boundary builds them
+    /// from the region graph's spans; core validates, mints and places them.
+    ///
+    /// Non-destructive, like every other derived geometry in this document: the
+    /// source path is **hidden, not deleted**, and one undo restores it.
+    BreakPath {
+        node_id: NodeId,
+        pieces: Vec<OutlinePath>,
     },
     /// Bind a motion source to a numeric slot (MES §12, Task 6.0).
     ///
@@ -255,6 +306,82 @@ pub enum Command {
     SetAppearances {
         node_id: NodeId,
         appearances: Vec<AppearanceLayer>,
+    },
+    /// **Rewrite a text node's string** (Task 11.0 RULE 1).
+    ///
+    /// A string is not a `ParamValue`, so this is its own command rather than a
+    /// `SetParameter` write — the same reason [`Command::RenameNode`] exists.
+    /// It is *only* the string: family, alignment and every number stay where
+    /// they are, so retyping a word never moves the type it was set in.
+    SetText {
+        node_id: NodeId,
+        text: String,
+    },
+    /// Choose a text node's font family (a string, like [`Command::RenameNode`]):
+    /// the name the boundary's font library resolves. An unknown family is
+    /// accepted and *diagnosed* — the run falls back to the bundled face — so a
+    /// document written on one machine opens on another with its words intact.
+    SetFontFamily {
+        node_id: NodeId,
+        family: String,
+    },
+    /// Set a text node's line alignment. Structure, not a number: the layout
+    /// branches on it (see [`crate::document::TextAlign::line_start`]).
+    SetTextAlignment {
+        node_id: NodeId,
+        alignment: TextAlign,
+    },
+    /// **Bind a text node to a path** (RULE 2): the run follows the bound node's
+    /// evaluated geometry, sliding `offset` document units along it.
+    ///
+    /// Validated before anything is stored: the target must exist and must be
+    /// *path-shaped* (`Path`, `Arc` or `Circle`). That restriction is what lets
+    /// evaluation stay a single pass — a text node can never bind to text, so
+    /// the run's geometry is always resolvable without recursion.
+    ///
+    /// Binding a node that is already bound is a *re-bind*; the inverse carries
+    /// the previous binding, so ⌘Z restores the old path **and** the old offset.
+    BindTextToPath {
+        node_id: NodeId,
+        path: NodeId,
+        offset: Parameter<f64>,
+    },
+    /// Unbind a text node: it returns to its `x`/`y` baseline, keeping every
+    /// typographic property (and its text) exactly as it was.
+    UnbindTextFromPath {
+        node_id: NodeId,
+    },
+    /// **Outline to paths** (RULE 3): replace a text node's *rendering* with real
+    /// letterform geometry — one [`NodeKind::Path`] per outlined run, grouped,
+    /// with the original text node hidden rather than deleted.
+    ///
+    /// # Why the command carries the plan
+    ///
+    /// Shaping is not the core's business: the glyph outlines come out of the
+    /// font library, which lives in `vectra-geometry`. The command therefore
+    /// carries what that library produced — `group_id` and one
+    /// [`OutlinePath`] per letterform — exactly as [`Command::ApplyOperation`]
+    /// carries an operation record and [`Command::SetPath`] carries a pen
+    /// sketch. Core stays font-free, the boundary stays thin, and the whole
+    /// conversion is still **one undoable command**.
+    ///
+    /// # Non-destructive, and that is a testable claim
+    ///
+    /// The text node is not deleted and not edited: it is *hidden*
+    /// (`visible = false`), so its string, its parameters and its bindings are
+    /// all still there — the inverse re-shows it and removes the group. Undo of
+    /// an outline is therefore exact, and redo re-applies it with the same ids,
+    /// so a boolean built on an outlined letterform survives the round trip.
+    OutlineText {
+        node_id: NodeId,
+        /// The group that holds the outlined letterforms (minted by the caller,
+        /// so undo and redo address the same node).
+        group_id: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// One entry per outlined letterform, in draw order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<OutlinePath>,
     },
     /// Show or hide a node (Task 10.2 RULE 4). One `bool`, one history entry,
     /// **no re-evaluation** — the event it publishes is `NodeFlagsChanged`.
@@ -495,6 +622,56 @@ fn default_artboard_background() -> Color {
     Color::WHITE
 }
 
+/// Move a freshly inserted node onto `layer` (Task 11.0).
+///
+/// Fetch a node that must be a **text** node, or explain why it is not.
+///
+/// The three text commands and the outline all begin with this question; asking
+/// it once is what keeps their refusals identical (`UnknownProperty`-shaped for
+/// a non-text node, naming the property the caller meant) instead of drifting
+/// into four different messages.
+fn text_node_mut<'a>(
+    doc: &'a mut Document,
+    id: NodeId,
+    property: &str,
+) -> Result<&'a mut Node, VectraError> {
+    let kind_tag = doc
+        .nodes
+        .get(&id)
+        .map(|node| node.kind.tag().to_string())
+        .unwrap_or_else(|| "missing".to_string());
+    let node = doc
+        .nodes
+        .get_mut(&id)
+        .ok_or(VectraError::NodeNotFound(id))?;
+    if !matches!(node.kind, NodeKind::Text { .. }) {
+        return Err(VectraError::UnknownProperty {
+            node_id: id,
+            node_kind: kind_tag,
+            property: property.to_string(),
+        });
+    }
+    Ok(node)
+}
+
+/// One outlined letterform, ready to be inserted as a [`NodeKind::Path`]
+/// (Task 11.0 RULE 3).
+///
+/// The geometry is the same `start` + `segments` pair a drawn path uses, so an
+/// outlined glyph is not a second kind of geometry: it can be grouped,
+/// booleaned, constrained, animated and exported by everything that already
+/// exists. One entry per *letterform* (a character's contours, outer and
+/// counters, are subpaths of the one node).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutlinePath {
+    /// The id the caller minted for this letterform's node.
+    pub id: NodeId,
+    /// Display name — the character, so the layers panel reads `A`, `b`, `“`.
+    pub name: String,
+    pub start: Parameter<Point2>,
+    pub segments: Vec<PathSegment>,
+}
+
 impl Command {
     /// Human-readable label for undo menus / devtools.
     pub fn label(&self) -> String {
@@ -522,6 +699,10 @@ impl Command {
                 other => format!("Apply {}", other.tag()),
             },
             Self::RemoveOperation { .. } => "Remove operation".to_string(),
+            Self::CreateSmartFill { boundaries, .. } => {
+                format!("Smart fill ({} boundary/ies)", boundaries.len())
+            }
+            Self::BreakPath { pieces, .. } => format!("Break path ({} piece(s))", pieces.len()),
             Self::SetOperationEnabled { enabled, .. } => {
                 if *enabled {
                     "Enable operation".to_string()
@@ -552,6 +733,23 @@ impl Command {
             Self::SetPath { segments, .. } => format!("Set path ({} segment(s))", segments.len()),
             Self::SetAppearances { appearances, .. } => {
                 format!("Set appearance ({} layer(s))", appearances.len())
+            }
+            // The label quotes the *edit*, the way a text field's undo entry
+            // should: a designer undoing a retype wants to see what they typed.
+            Self::SetText { text, .. } => {
+                let short: String = text.chars().take(24).collect();
+                if text.chars().count() > 24 {
+                    format!("Type \"{short}…\"")
+                } else {
+                    format!("Type \"{short}\"")
+                }
+            }
+            Self::SetFontFamily { family, .. } => format!("Font: {family}"),
+            Self::SetTextAlignment { alignment, .. } => format!("Align {}", alignment.tag()),
+            Self::BindTextToPath { .. } => "Bind text to path".to_string(),
+            Self::UnbindTextFromPath { .. } => "Unbind text from path".to_string(),
+            Self::OutlineText { paths, .. } => {
+                format!("Outline text ({} letterform(s))", paths.len())
             }
             Self::SetNodeVisible { visible, .. } => {
                 if *visible { "Show node" } else { "Hide node" }.to_string()
@@ -630,6 +828,29 @@ impl Command {
             // shape `SetParameter` publishes, so the incremental evaluator
             // dirties exactly this node and nothing else.
             Self::SetPath { id, .. } => vec![EngineEvent::NodesUpdated { ids: vec![*id] }],
+            // Text edits are node changes like any other: the string, the
+            // family, the alignment and the binding all change *this* node's
+            // geometry, and the run re-lays out on the next settle.
+            Self::SetText { node_id, .. }
+            | Self::SetFontFamily { node_id, .. }
+            | Self::SetTextAlignment { node_id, .. }
+            | Self::BindTextToPath { node_id, .. }
+            | Self::UnbindTextFromPath { node_id } => vec![EngineEvent::NodesUpdated {
+                ids: vec![*node_id],
+            }],
+            // Outlining touches three sets of ids: the group that now holds the
+            // letterforms, the letterforms themselves (new geometry the renderer
+            // has never seen) and the source text node (which stops drawing).
+            Self::OutlineText {
+                node_id,
+                group_id,
+                paths,
+                ..
+            } => {
+                let mut ids = vec![*node_id, *group_id];
+                ids.extend(paths.iter().map(|path| path.id));
+                vec![EngineEvent::NodesUpdated { ids }, EngineEvent::OrderChanged]
+            }
             Self::DeleteNode { id } => vec![
                 EngineEvent::NodesRemoved { ids: vec![*id] },
                 EngineEvent::OrderChanged,
@@ -691,6 +912,22 @@ impl Command {
             ],
             Self::SetOperationEnabled { id, .. } => {
                 vec![EngineEvent::OperationsUpdated { ids: vec![*id] }]
+            }
+            // A Smart Fill is a registry entry: creating it touches no source,
+            // so the event is the registry one. The fill's *geometry* arrives
+            // through the operations pass, exactly like a boolean's.
+            Self::CreateSmartFill { id, .. } => {
+                vec![EngineEvent::OperationsUpdated { ids: vec![*id] }]
+            }
+            // Breaking a path is an ordinary geometry edit of the document's own
+            // nodes: the pieces are new nodes, the source is hidden, and the
+            // dirty ids are exactly those — so the dependency graph re-resolves
+            // the pieces' slots and every Smart Fill reading the source
+            // re-derives its region through `affected_by`, with no special case.
+            Self::BreakPath { node_id, pieces } => {
+                let mut ids: Vec<NodeId> = vec![*node_id];
+                ids.extend(pieces.iter().map(|piece| piece.id));
+                vec![EngineEvent::NodesUpdated { ids }]
             }
             // A procedural change dirties its own node; the pass then
             // propagates along the chain and the readers of the changed ports
@@ -903,6 +1140,10 @@ impl Command {
                     id: op.id,
                     kind: op.kind,
                     inputs: op.inputs,
+                    // The whole record, paint included: a Smart Fill withdrawn
+                    // with its boundary comes back wearing what it wore.
+                    style: Some(op.style),
+                    name: Some(op.name),
                 }));
                 // The same discipline for the procedural graph: a `Source` node
                 // whose subject just vanished has nothing to read, so it is
@@ -1104,7 +1345,13 @@ impl Command {
                 })?;
                 Ok(Self::SetMotionTrack { track: removed })
             }
-            Self::ApplyOperation { id, kind, inputs } => {
+            Self::ApplyOperation {
+                id,
+                kind,
+                inputs,
+                style,
+                name,
+            } => {
                 OperationNode::validate(*id, kind, inputs)?;
                 // An operation's parameters are slots too: a mirror plane may
                 // read a port, and the operation's own output is a shape a
@@ -1131,7 +1378,16 @@ impl Command {
                         "operation {id} already exists"
                     )));
                 }
-                let node = OperationNode::new(*id, kind.clone(), inputs.clone());
+                let mut node = OperationNode::new(*id, kind.clone(), inputs.clone());
+                // The full record, when the caller has one: undo of
+                // `RemoveOperation` re-applies this command, and a Smart Fill's
+                // paint is part of what was removed.
+                if let Some(style) = style {
+                    node.style = style.clone();
+                }
+                if let Some(name) = name {
+                    node.name = name.clone();
+                }
                 doc.operations.insert(node);
                 Ok(Self::RemoveOperation { id: *id })
             }
@@ -1140,12 +1396,15 @@ impl Command {
                     .operations
                     .remove(*id)
                     .ok_or(VectraError::OperationNotFound(*id))?;
-                // Exact inverse: the same id, kind and inputs (RULE 1 — nothing
-                // about the sources is part of this record).
+                // Exact inverse: the whole record — id, kind, inputs, paint and
+                // name. The paint is what Task 12.0 added; the inputs are what
+                // RULE 1 promised was never touched.
                 Ok(Self::ApplyOperation {
                     id: removed.id,
                     kind: removed.kind,
                     inputs: removed.inputs,
+                    style: Some(removed.style),
+                    name: Some(removed.name),
                 })
             }
             Self::SetOperationEnabled { id, enabled } => {
@@ -1160,6 +1419,135 @@ impl Command {
                     id: *id,
                     enabled: previous,
                 })
+            }
+            Self::CreateSmartFill {
+                id,
+                boundaries,
+                seed,
+                fill,
+                name,
+            } => {
+                if boundaries.is_empty() {
+                    return Err(VectraError::command(
+                        "a smart fill needs at least one boundary path".to_string(),
+                    ));
+                }
+                for (index, boundary) in boundaries.iter().enumerate() {
+                    if boundaries[..index].contains(boundary) {
+                        return Err(VectraError::command(format!(
+                            "smart fill {id} lists boundary {boundary} twice"
+                        )));
+                    }
+                    // The boundaries must exist — a region over a missing shape
+                    // is not a region. (A *hidden* boundary is fine: hiding is a
+                    // presentation flag, not a deletion, and a designer may well
+                    // fill between two shapes they are not showing.)
+                    doc.get_node(*boundary)?;
+                }
+                if doc.operations.contains(*id) {
+                    return Err(VectraError::command(format!(
+                        "operation {id} already exists"
+                    )));
+                }
+                if !seed.0.is_finite() || !seed.1.is_finite() {
+                    return Err(VectraError::command(format!(
+                        "smart fill {id} has a non-finite seed ({}, {})",
+                        seed.0, seed.1
+                    )));
+                }
+                let mut node = OperationNode::smart_fill(*id, boundaries.clone(), *seed);
+                if let Some(name) = name {
+                    node.name = name.clone();
+                }
+                if let Some(fill) = fill {
+                    // **RULE 4.** The drop *is* the fill: the bottom row of the
+                    // default stack is replaced rather than appended to, so a
+                    // dropped colour produces a fill with exactly one solid row
+                    // of that colour — and every other row (a stroke, a blend)
+                    // still comes from the default stack.
+                    let mut style = OperationNode::default_style();
+                    style.appearances = vec![AppearanceLayer::fill(*fill)];
+                    node.style = style;
+                }
+                doc.operations.insert(node);
+                Ok(Self::RemoveOperation { id: *id })
+            }
+            Self::BreakPath { node_id, pieces } => {
+                // 1. Validate everything before anything is written: the source
+                //    must be a path, the pieces must be real and free ids.
+                let (style, layer, source_index) = {
+                    let node = doc.get_node(*node_id)?;
+                    if !matches!(node.kind, NodeKind::Path { .. }) {
+                        return Err(VectraError::command(format!(
+                            "only a Path can be broken at its intersections; {} is a {}",
+                            node.name,
+                            node.kind.tag()
+                        )));
+                    }
+                    if pieces.is_empty() {
+                        return Err(VectraError::command(
+                            "there is nothing to break: no spans were given".to_string(),
+                        ));
+                    }
+                    (
+                        node.style.clone(),
+                        doc.layers.layer_of(*node_id).map(|(layer, _)| layer.id),
+                        doc.order_index(*node_id).unwrap_or(0),
+                    )
+                };
+                for (index, piece) in pieces.iter().enumerate() {
+                    if doc.nodes.contains_key(&piece.id) || doc.operations.contains(piece.id) {
+                        return Err(VectraError::NodeAlreadyExists(piece.id));
+                    }
+                    if pieces[..index].iter().any(|other| other.id == piece.id) {
+                        return Err(VectraError::command(format!(
+                            "break of {node_id} lists piece {} twice",
+                            piece.id
+                        )));
+                    }
+                }
+
+                // 2. The pieces are ordinary `Path` nodes wearing the source's
+                //    paint, so a break does not restyle the artwork.
+                for (offset, piece) in pieces.iter().enumerate() {
+                    let mut node = Node::new(
+                        piece.id,
+                        piece.name.clone(),
+                        NodeKind::Path {
+                            start: piece.start.clone(),
+                            segments: piece.segments.clone(),
+                        },
+                    );
+                    node.style = style.clone();
+                    doc.insert_node(node, Some(source_index + 1 + offset))?;
+                }
+
+                // 3. **Non-destructive**: the source is hidden, not deleted —
+                //    its control points are still there, which is what a designer
+                //    returning to the curve wants, and what makes the inverse a
+                //    one-line restore rather than a saved copy.
+                doc.get_node_mut(*node_id)?.visible = false;
+
+                // 4. Place: the pieces take the source's own place in its layer,
+                //    directly above it (the source is hidden, so this is purely
+                //    so the new geometry draws where the old geometry drew).
+                if let Some(layer_id) = layer {
+                    let block: Vec<NodeId> = pieces.iter().map(|piece| piece.id).collect();
+                    doc.assign_block_above(&block, layer_id, *node_id);
+                }
+
+                // The inverse, as one entry: take the pieces out, show the
+                // source again. Reversed so undo unwinds last-in-first-out.
+                let mut commands: Vec<Command> = pieces
+                    .iter()
+                    .rev()
+                    .map(|piece| Self::DeleteNode { id: piece.id })
+                    .collect();
+                commands.push(Self::SetNodeVisible {
+                    id: *node_id,
+                    visible: true,
+                });
+                Ok(Self::Batch { commands })
             }
             Self::AddProceduralNode { node } => {
                 if doc.procedural.contains(node.id) {
@@ -1289,15 +1677,231 @@ impl Command {
                 node_id,
                 appearances,
             } => {
-                let node = doc
-                    .nodes
-                    .get_mut(node_id)
-                    .ok_or(VectraError::NodeNotFound(*node_id))?;
-                let previous = std::mem::replace(&mut node.style.appearances, appearances.clone());
+                // An **operation result is a node**, and its paint stack is what
+                // Task 12.0 RULE 2 means by "a Smart Fill has its own
+                // `Appearance`": the registry entry carries a `StyleProperties`
+                // exactly like an authored node, so the same command edits both.
+                // (Before Task 12.0 this arm only knew about `doc.nodes`, which
+                // would have refused a paint change on a boolean's own id.)
+                let previous = if let Some(node) = doc.nodes.get_mut(node_id) {
+                    std::mem::replace(&mut node.style.appearances, appearances.clone())
+                } else if let Some(operation) = doc.operations.nodes.get_mut(node_id) {
+                    std::mem::replace(&mut operation.style.appearances, appearances.clone())
+                } else {
+                    return Err(VectraError::NodeNotFound(*node_id));
+                };
                 Ok(Self::SetAppearances {
                     node_id: *node_id,
                     appearances: previous,
                 })
+            }
+            // ── text (Task 11.0 RULES 1–3) ────────────────────────────────
+            //
+            // Four small commands rather than one setter with a `name`, because
+            // each inverse is then exactly what it replaced: a string, a string,
+            // an enum. A generic setter would have to invent a value type for
+            // three different things, and undo — which is the reason these exist
+            // at all — would have to guess which one it held.
+            Self::SetText { node_id, text } => {
+                let node = text_node_mut(doc, *node_id, "text")?;
+                let NodeKind::Text {
+                    text: authored_text,
+                    ..
+                } = &mut node.kind
+                else {
+                    unreachable!("text_node_mut checked the kind")
+                };
+                let previous = std::mem::replace(authored_text, text.clone());
+                Ok(Self::SetText {
+                    node_id: *node_id,
+                    text: previous,
+                })
+            }
+            Self::SetFontFamily { node_id, family } => {
+                let node = text_node_mut(doc, *node_id, "font_family")?;
+                let NodeKind::Text {
+                    font_family: authored_family,
+                    ..
+                } = &mut node.kind
+                else {
+                    unreachable!("text_node_mut checked the kind")
+                };
+                let previous = std::mem::replace(authored_family, family.clone());
+                Ok(Self::SetFontFamily {
+                    node_id: *node_id,
+                    family: previous,
+                })
+            }
+            Self::SetTextAlignment { node_id, alignment } => {
+                let node = text_node_mut(doc, *node_id, "alignment")?;
+                let NodeKind::Text {
+                    alignment: authored_alignment,
+                    ..
+                } = &mut node.kind
+                else {
+                    unreachable!("text_node_mut checked the kind")
+                };
+                let previous = std::mem::replace(authored_alignment, *alignment);
+                Ok(Self::SetTextAlignment {
+                    node_id: *node_id,
+                    alignment: previous,
+                })
+            }
+            Self::BindTextToPath {
+                node_id,
+                path,
+                offset,
+            } => {
+                // Validated **before** anything is stored: a binding to a
+                // missing node or a non-path kind is refused whole, so the
+                // document never holds a reference that evaluation cannot honor.
+                let source = doc.get_node(*path)?;
+                if !Document::is_text_path_source(&source.kind) {
+                    return Err(VectraError::command(format!(
+                        "cannot bind text {node_id} to {path}: {} is not a path, arc or circle",
+                        source.kind.tag()
+                    )));
+                }
+                let binding = crate::document::TextPathBinding {
+                    node: *path,
+                    offset: offset.clone(),
+                };
+                let node = text_node_mut(doc, *node_id, "path")?;
+                let NodeKind::Text { on_path, .. } = &mut node.kind else {
+                    unreachable!("text_node_mut checked the kind")
+                };
+                let previous = on_path.replace(binding);
+                Ok(match previous {
+                    Some(previous) => Self::BindTextToPath {
+                        node_id: *node_id,
+                        path: previous.node,
+                        offset: previous.offset,
+                    },
+                    None => Self::UnbindTextFromPath { node_id: *node_id },
+                })
+            }
+            Self::UnbindTextFromPath { node_id } => {
+                let node = text_node_mut(doc, *node_id, "path")?;
+                let NodeKind::Text { on_path, .. } = &mut node.kind else {
+                    unreachable!("text_node_mut checked the kind")
+                };
+                let previous = on_path.take().ok_or_else(|| {
+                    VectraError::command(format!(
+                        "text {node_id} is not bound to a path, so there is nothing to unbind"
+                    ))
+                })?;
+                Ok(Self::BindTextToPath {
+                    node_id: *node_id,
+                    path: previous.node,
+                    offset: previous.offset,
+                })
+            }
+            Self::OutlineText {
+                node_id,
+                group_id,
+                name,
+                paths,
+            } => {
+                // The guarantees this command makes, checked before the first
+                // mutation: a real text node, a non-empty plan, and an id that
+                // is not already taken (the group, the letterforms and the
+                // source are four different nodes — a caller that reuses an id
+                // is refused rather than half-applied).
+                //
+                // *Every* check runs before the first write, and the id checks
+                // run before the source is borrowed: a refusal must leave the
+                // document exactly as it was, and a half-applied outline would
+                // be neither the old document nor the new one.
+                if !doc.nodes.contains_key(node_id) {
+                    return Err(VectraError::NodeNotFound(*node_id));
+                }
+                if paths.is_empty() {
+                    return Err(VectraError::command(format!(
+                        "cannot outline text {node_id}: the run produced no letterforms"
+                    )));
+                }
+                if doc.nodes.contains_key(group_id) {
+                    return Err(VectraError::NodeAlreadyExists(*group_id));
+                }
+                if paths.iter().any(|path| doc.nodes.contains_key(&path.id)) {
+                    let taken = paths
+                        .iter()
+                        .find(|path| doc.nodes.contains_key(&path.id))
+                        .map(|path| path.id)
+                        .expect("just found");
+                    return Err(VectraError::NodeAlreadyExists(taken));
+                }
+                let style = text_node_mut(doc, *node_id, "outline")?.style.clone();
+                let layer = doc.layers.layer_of(*node_id).map(|(layer, _)| layer.id);
+                let text_index = doc.order_index(*node_id);
+
+                // 1. The group, placed directly above the text it replaces, so
+                //    an outline appears where the type was rather than at the
+                //    top of the document.
+                let children: Vec<NodeId> = paths.iter().map(|path| path.id).collect();
+                let group_name = name.clone().unwrap_or_else(|| "Outlined text".to_string());
+                doc.insert_node(
+                    Node::new(
+                        *group_id,
+                        group_name,
+                        NodeKind::Group {
+                            children: children.clone(),
+                        },
+                    ),
+                    text_index.map(|index| index + 1),
+                )?;
+
+                // 2. The letterforms: ordinary `Path` nodes carrying the text
+                //    node's own paint, so the outline looks exactly like the type
+                //    it replaces — a red gradient-filled word outlines to red
+                //    gradient-filled letters, with no second styling step.
+                for (index, path) in paths.iter().enumerate() {
+                    let mut node = Node::new(
+                        path.id,
+                        path.name.clone(),
+                        NodeKind::Path {
+                            start: path.start.clone(),
+                            segments: path.segments.clone(),
+                        },
+                    );
+                    node.style = style.clone();
+                    doc.insert_node(node, None)?;
+                    doc.set_parent(path.id, Some(*group_id), index)?;
+                }
+
+                // 3. **Non-destructive**: the text node is hidden, not deleted.
+                //    Its string, its slots and its bindings are all still there,
+                //    which is what makes the inverse exact and what lets a
+                //    designer come back to the type after a detour through
+                //    boolean operations.
+                doc.get_node_mut(*node_id)?.visible = false;
+
+                // 4. Membership and **place**: the group and its letterforms
+                //    land on the layer the type was on — so outlining an object
+                //    on layer 3 does not move it to whichever layer happens to
+                //    be active — and *directly above the type*, not at the top
+                //    of the layer: the outline takes the type's place in the
+                //    stack, and artwork that was above the type stays above it.
+                if let Some(layer_id) = layer {
+                    let block = doc.node_block(*group_id);
+                    doc.assign_block_above(&block, layer_id, *node_id);
+                }
+
+                // The inverse, as one entry: take the letterforms out, take the
+                // group out, show the type again. The order matters — the group
+                // is removed *last*, so undo recreates it *first* and every
+                // letterform can be re-parented into a group that exists again.
+                let mut commands: Vec<Command> = children
+                    .iter()
+                    .rev()
+                    .map(|id| Self::DeleteNode { id: *id })
+                    .collect();
+                commands.push(Self::DeleteNode { id: *group_id });
+                commands.push(Self::SetNodeVisible {
+                    id: *node_id,
+                    visible: true,
+                });
+                Ok(Self::Batch { commands })
             }
             // ── presentation flags (Task 10.2 RULE 4) ────────────────────
             Self::SetNodeVisible { id, visible } => {

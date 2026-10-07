@@ -30,7 +30,7 @@
  * rendered at all.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
 import { VectraClient } from './engine/client';
 import { documentHost } from './engine/host';
@@ -41,6 +41,7 @@ import DrawOverlay from './components/DrawOverlay';
 import NavigationOverlay from './components/NavigationOverlay';
 import LayersPanel from './components/LayersPanel';
 import AppearancePanel from './components/AppearancePanel';
+import TextPanel from './components/TextPanel';
 import ArtboardBar from './components/ArtboardBar';
 import ComponentPanel from './components/ComponentPanel';
 import MagicBar from './components/MagicBar';
@@ -67,10 +68,12 @@ import type { TouchAction } from './engine/draw/touch';
 import { StreamLine, streamlineAmount } from './engine/draw/streamline';
 import {
   dropChangesStack,
+  dropRegion,
   dropStatus,
   planColorDrop,
   stackWithColor,
 } from './engine/draw/colordrop';
+import RegionOverlay from './components/RegionOverlay';
 import { holdHint } from './engine/draw/quick-shape';
 import {
   anchorLabel,
@@ -81,6 +84,8 @@ import {
   placeOverlay,
   revealedHandles,
 } from './engine/draw/path-edit';
+import { breakSpans, breakStatus, regionShape, regionStatus, spanRows } from './engine/draw/regions';
+import type { SpanRow } from './engine/draw/regions';
 import type { PlacedOverlay } from './engine/draw/path-edit';
 import {
   addConstraint,
@@ -89,20 +94,24 @@ import {
   batch,
   beginDrag,
   bindTrack,
+  bindTextToPath,
   booleanOperation,
   coincidentConstraints,
   connectProcedural,
   createBoundCircle,
   createBoundRectangle,
   createCircle,
+  createSmartFill,
   createGroup,
   createRectangle,
+  createText,
   defineExpression,
   deleteNode,
   disconnectProcedural,
   distanceConstraint,
   duplicateNode,
   endDrag,
+  lit,
   modifierOperation,
   setAppearances,
   motionTrack,
@@ -120,6 +129,7 @@ import {
   setProceduralOperand,
   setVariable,
   unbindParam,
+  unbindTextFromPath,
   updateDrag,
   verticalConstraint,
 } from './engine/commands';
@@ -147,10 +157,13 @@ import {
 } from './engine/view-model';
 import {
   appearanceStack,
+  boundTrack,
   gridStyle,
+  hexToColor,
   overlayBoards,
   panGestureAllowed,
   showsAppearancePanel,
+  showsTextPanel,
   selectedNode,
   stackToWire,
   wheelZoomFactor,
@@ -172,9 +185,11 @@ import type {
   ProceduralKindOptionWire,
   DocumentSummaryWire,
   ProceduralReportWire,
+  RegionPlanWire,
   SnapshotWire,
   StrengthWire,
   ComponentPropWire,
+  ComponentReplyWire,
   ComponentViewWire,
   StructuralMacroWire,
 } from './engine/wire';
@@ -458,6 +473,17 @@ export default function App() {
   //   on release, against the engine's hit test.
   const [streamline, setStreamline] = useState(30);
   const [dropColor, setDropColor] = useState('#e8622c');
+  /**
+   * **The live region plan** (Task 12.0 RULE 1): the engine's region graph for
+   * the editing context, probed at the pointer.
+   *
+   * One piece of state serves the tool's hover and RULE 4's drag, because they
+   * are the same question asked twice — *which face is under this point?* — and
+   * sharing it is what makes the colour drag highlight exactly the region the
+   * click would fill. `null` means "not asking": the pointer is off the canvas,
+   * or no region tool is in hand.
+   */
+  const [regionPlan, setRegionPlan] = useState<RegionPlanWire | null>(null);
   const [dropPos, setDropPos] = useState<{ x: number; y: number } | null>(null);
   /** **RULE 1**: the multi-touch recogniser. A ref, because it is the gesture's
    *  state across events, not a value the UI renders. */
@@ -1049,29 +1075,60 @@ export default function App() {
         appendLog('info', '◧ ColorDrop · released outside the canvas — nothing to fill');
         return;
       }
+      // **Task 12.0 RULE 4, first**: is the drop inside an enclosed area? The
+      // point goes through the engine's region graph, and a hit makes a *new
+      // Smart Fill* pinned to that region — which is not a recoloured shape and
+      // does not become one. The shape test below is what happens when there is
+      // no enclosed area to drop into.
+      const point = docPoint(clientX, clientY);
+      const plan = client.smartFillPlan([], point ? [point.x, point.y] : null);
+      const region = dropRegion(plan, point ? [point.x, point.y] : null);
       // **The rule's own tool**: the renderer's hit test, the same index a click
       // uses. No UI-side region maths exists to go wrong.
       const nodeId = client.pointerHit(clientX, clientY);
-      const plan = planColorDrop(nodeId, dropColor);
-      if (plan.kind === 'noop') {
-        appendLog('info', dropStatus(plan, null));
+      const drop = planColorDrop(nodeId, dropColor, region);
+      if (drop.kind === 'smartFill') {
+        setRegionPlan(null);
+        runCommand(
+          'ColorDrop → Smart Fill',
+          createSmartFill({
+            boundaries: drop.boundaries,
+            seed: drop.seed,
+            fill: hexToColor(drop.color),
+            name: drop.name,
+          }),
+        );
+        appendLog('cmd', dropStatus(drop, null));
         return;
       }
-      const node = snapshot?.scene.nodes[plan.nodeId] ?? null;
+      if (drop.kind === 'noop') {
+        appendLog('info', dropStatus(drop, null));
+        return;
+      }
+      const node = snapshot?.scene.nodes[drop.nodeId] ?? null;
       const stack = appearanceStack(node);
-      if (!dropChangesStack(stack, plan.color)) {
-        appendLog('info', `◧ ColorDrop · ${node?.name ?? plan.nodeId} is already that colour`);
+      if (!dropChangesStack(stack, drop.color)) {
+        appendLog('info', `◧ ColorDrop · ${node?.name ?? drop.nodeId} is already that colour`);
         return;
       }
-      runCommand('ColorDrop fill', setAppearances(plan.nodeId, stackToWire(stackWithColor(stack, plan.color))));
-      appendLog('cmd', dropStatus(plan, node?.name ?? null));
+      runCommand(
+        'ColorDrop fill',
+        setAppearances(drop.nodeId, stackToWire(stackWithColor(stack, drop.color))),
+      );
+      appendLog('cmd', dropStatus(drop, node?.name ?? null));
     },
-    [client, dropColor, snapshot, appendLog, runCommand],
+    [client, dropColor, snapshot, appendLog, runCommand, docPoint, probeRegion],
   );
 
   useEffect(() => {
     if (!dropPos) return;
-    const move = (event: PointerEvent) => setDropPos({ x: event.clientX, y: event.clientY });
+    const move = (event: PointerEvent) => {
+      setDropPos({ x: event.clientX, y: event.clientY });
+      // The region under the *drag* is identified as it travels — the highlight
+      // the designer sees is the face the drop would fill, read from the same
+      // plan the drop itself uses.
+      probeRegion(event.clientX, event.clientY);
+    };
     const up = (event: PointerEvent) => finishColorDrop(event.clientX, event.clientY);
     const cancel = () => setDropPos(null);
     window.addEventListener('pointermove', move);
@@ -1082,7 +1139,7 @@ export default function App() {
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', cancel);
     };
-  }, [dropPos !== null, finishColorDrop]);
+  }, [dropPos !== null, finishColorDrop, probeRegion]);
 
   const runFullReeval = useCallback(() => {
     if (!client) return;
@@ -1631,6 +1688,9 @@ export default function App() {
   const hoverSlot = useCallback((nodeId: string): string | null => {
     const primitive = snapshot?.scene.nodes[nodeId]?.primitive;
     if (!primitive) return null;
+    // **Task 11.0**: a run's size is `font_size`, not a box (its box is an
+    // output of layout), so a hover demo on type animates the type size.
+    if (primitive.type === 'text') return 'font_size';
     return primitive.type === 'circle' || primitive.type === 'arc' ? 'radius' : 'width';
   }, [snapshot]);
 
@@ -1748,6 +1808,10 @@ export default function App() {
   /** The pointer left the canvas: no position to report, so the engine is told
    *  just that — a leave is not a place. */
   const onCanvasLeave = useCallback(() => {
+    // Leaving the canvas ends the hover, so the region highlight goes with it —
+    // a face left glowing under a pointer that is somewhere else is a lie about
+    // where the next click would land.
+    setRegionPlan(null);
     if (!client) return;
     const res = client.pointerLeave();
     if (res.status === 'ok' && res.events.length > 0) {
@@ -1756,6 +1820,27 @@ export default function App() {
       kick();
     }
   }, [client, logResponse, refresh, kick]);
+
+  /**
+   * **Ask the engine which face is under a client point** (Task 12.0 RULE 1).
+   *
+   * The ids are `[]`, which the engine reads as RULE 1's own sentence: the
+   * selection when there is one, else the active layer's shapes. This file
+   * therefore decides no boundary set of its own — and the point is mapped to
+   * document units by the renderer's camera, so the region graph is asked about
+   * the coordinates the geometry is actually in.
+   */
+  const probeRegion = useCallback(
+    (clientX: number, clientY: number): RegionPlanWire | null => {
+      if (!client) return null;
+      const point = docPoint(clientX, clientY);
+      if (!point) return null;
+      const plan = client.smartFillPlan([], [point.x, point.y]);
+      setRegionPlan(plan);
+      return plan;
+    },
+    [client, docPoint],
+  );
 
   /**
    * Task 5.0: a canvas click *names* a layer — the renderer said which one, and
@@ -1768,6 +1853,74 @@ export default function App() {
       return prev.length >= 2 ? [id] : [...prev, id];
     });
   }, []);
+
+  /**
+   * **The selected path's spans** (Task 12.0 RULE 3): what the Region block in
+   * the Appearance panel lists and breaks.
+   *
+   * Asked of the engine for the selected node alone — `[id]` rather than RULE
+   * 1's editing context — because "break *this* path" is about this path's
+   * outline: which of its arcs lie between crossings. A node that is not a Path
+   * (or a selection that is not one object) has no spans, and the panel then
+   * offers no break.
+   *
+   * Recomputed when the snapshot changes: moving a shape across another changes
+   * where the crossings are, so the spans are geometry, not selection.
+   */
+  const selectedSpans = useMemo<SpanRow[]>(() => {
+    if (!client || selection.length !== 1) return [];
+    const node = selectedNode(snapshot, selection);
+    if (!node || node.primitive.type !== 'path') return [];
+    const plan = client.smartFillPlan([node.id], null);
+    return spanRows(plan, node.id);
+  }, [client, selection, snapshot]);
+
+  /**
+   * **Break Path at Intersections** (Task 12.0 RULE 3).
+   *
+   * The engine does the cutting — `break_path` receives the arc lengths the plan
+   * reported and returns the pieces as ordinary `Path` nodes. `rows` is the span
+   * the designer picked, or all of them: one span splits the path into the two
+   * arcs that meet at its ends, every span splits it into its arcs between
+   * crossings. Either way the source is hidden rather than deleted, so undo is
+   * one step and nothing is lost.
+   */
+  const breakSelectedPath = useCallback(
+    (rows: SpanRow[]) => {
+      if (!client || rows.length === 0) return;
+      const node = selectedNode(snapshot, selection);
+      if (!node) return;
+      appendLog('cmd', `→ break ${node.name} at ${rows.length} span(s)`);
+      const reply = client.breakPath(node.id, breakSpans(rows));
+      absorb(client, reply);
+      if (reply.status === 'error') appendLog('error', `✗ ${reply.message}`);
+      else appendLog('cmd', breakStatus(rows, node.name));
+    },
+    [client, snapshot, selection, appendLog, absorb],
+  );
+
+  /**
+   * **Outline a run to letterform paths** (Task 11.0 RULE 3).
+   *
+   * The shaping happens in the engine (`outline_text`), not here: this file has
+   * no font, no glyph ids and no segment lists, and it should not. One call
+   * produces new path nodes, hides the type it replaced and returns the group's
+   * id in `created` — which is selected, so the designer's next move (a
+   * boolean, a distortion, a gradient) lands on the letterforms they just made.
+   */
+  const outlineTextNode = useCallback(
+    (nodeId: string) => {
+      if (!client) return;
+      appendLog('cmd', `→ Outline text ${nodeId}`);
+      const reply = client.outlineText(nodeId);
+      absorb(client, reply);
+      const created = (reply as ComponentReplyWire).created;
+      if (created) pickLayer(created);
+      else if (reply.status === 'error') appendLog('error', `✗ ${reply.message}`);
+    },
+    [client, absorb, appendLog, pickLayer],
+  );
+
 
   /** The selected layers as the constraint builders see them. */
   /**
@@ -2170,6 +2323,9 @@ export default function App() {
         holdTimer.current = null;
       }
       session.setTool(tool);
+      // A face was highlighted under the *old* tool's pointer; the new tool has
+      // not looked yet, so the highlight goes.
+      setRegionPlan(null);
       session.mutate({
         draft: null,
         samples: null,
@@ -2230,6 +2386,50 @@ export default function App() {
       const session = sessionRef.current;
       const point = docPoint(e.clientX, e.clientY);
       if (!point) return;
+      // The Text tool is not a *drawing* tool: `session.drawTool` deliberately
+      // stays null for it (no stroke to track, no gesture to cancel), so its
+      // click is handled here, before the pen and the brush get a look at it.
+      if (session.state.tool === 'text') {
+        e.preventDefault();
+        const created = client.dispatch(createText({ x: point.x, y: point.y, name: 'text' }));
+        if (created.status === 'error') {
+          appendLog('error', `✗ ${created.message}`);
+          return;
+        }
+        // `dispatch`'s envelope carries `created` (see `ComponentReplyWire`),
+        // so the new node is selected without guessing which uuid came back.
+        const id = (created as ComponentReplyWire).created;
+        if (id) pickLayer(id);
+        appendLog('info', `placed text at (${point.x.toFixed(1)}, ${point.y.toFixed(1)})`);
+        return;
+      }
+      // ── the Smart Fill tool (Task 12.0 RULE 1 + RULE 4) ──────────────
+      //
+      // One click, and everything about it is the engine's: the boundary set is
+      // RULE 1's own (the selection, else the active layer), the face is the
+      // region graph's answer for this very point, and the node it makes stores
+      // the boundaries and the seed — never the geometry.
+      if (session.state.tool === 'smartFill') {
+        e.preventDefault();
+        const plan = probeRegion(e.clientX, e.clientY) ?? regionPlan;
+        const drop = dropRegion(plan, [point.x, point.y]);
+        if (!drop) {
+          appendLog('info', regionStatus(plan));
+          return;
+        }
+        runCommand(
+          'Smart Fill',
+          createSmartFill({
+            boundaries: drop.boundaries,
+            seed: drop.seed,
+            fill: hexToColor(dropColor),
+            name: drop.name,
+          }),
+        );
+        appendLog('info', regionStatus(plan));
+        return;
+      }
+
       const tool = session.drawTool;
 
       // ── the pen and the brush ────────────────────────────────────────
@@ -2335,6 +2535,10 @@ export default function App() {
       pickLayer,
       refreshDraw,
       startDrag,
+      probeRegion,
+      regionPlan,
+      runCommand,
+      dropColor,
     ],
   );
 
@@ -2364,6 +2568,12 @@ export default function App() {
       if (session.state.isDrawing && session.state.gesture) return; // the window owns it
       const point = docPoint(e.clientX, e.clientY);
       if (!point) return;
+      // The Smart Fill tool's hover *is* a region read: the face under the
+      // pointer, straight from the engine. Nothing is drawn from a guess.
+      if (session.state.tool === 'smartFill') {
+        probeRegion(e.clientX, e.clientY);
+        return;
+      }
       if (session.state.tool === 'direct') {
         session.mutate({ cursor: point });
         const current = session.state.nodeId;
@@ -2377,7 +2587,7 @@ export default function App() {
       }
       onCanvasMove(e);
     },
-    [client, docPoint, syncDraw, onCanvasMove, appendLog, runTouchAction],
+    [client, docPoint, syncDraw, onCanvasMove, appendLog, runTouchAction, probeRegion],
   );
 
   /**
@@ -2839,6 +3049,16 @@ export default function App() {
                   holding={draw.isHoldingForSnap}
                   snapNote={draw.snapNote}
                 />
+                {/* **Task 12.0**: the face under the pointer — the Smart Fill
+                    tool's hover, and RULE 4's drop preview. Both read the same
+                    plan, so what glows is what the click or the drop fills. */}
+                {(draw.tool === 'smartFill' || dropPos !== null) && (
+                  <RegionOverlay
+                    shape={regionShape(regionPlan)}
+                    toClient={(points) => client?.documentToClient(points) ?? []}
+                    status={draw.tool === 'smartFill' ? regionStatus(regionPlan) : null}
+                  />
+                )}
               </>
             }
           />
@@ -2900,6 +3120,28 @@ export default function App() {
             <AppearancePanel
               node={selectedNode(snapshot, selection)}
               onCommand={runCommand}
+              disabled={!ready}
+              spans={selectedSpans}
+              onBreakPath={breakSelectedPath}
+            />
+          )}
+          {/* **Task 11.0**: the typography inspector, immediately below the
+              Appearance panel because that is the pair a selected word needs —
+              what it *says*, then how it is *painted*. Both obey the same
+              one-selection rule (`showsTextPanel` narrows it to a run). */}
+          {showsTextPanel(snapshot, selection) && (
+            <TextPanel
+              node={selectedNode(snapshot, selection)}
+              fonts={snapshot?.scene.fonts ?? []}
+              pathLength={boundTrack(selectedNode(snapshot, selection))}
+              onCommand={runCommand}
+              onOutline={outlineTextNode}
+              onBind={(nodeId, pathId) =>
+                runCommand('Bind text to path', bindTextToPath(nodeId, pathId, lit(0)))
+              }
+              onUnbind={(nodeId) =>
+                runCommand('Unbind text', unbindTextFromPath(nodeId))
+              }
               disabled={!ready}
             />
           )}

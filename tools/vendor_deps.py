@@ -497,6 +497,74 @@ def head_sha(repo: str) -> str | None:
     return r.stdout.split()[0] if r.stdout.strip() else None
 
 
+def branch_sha(repo: str, branch: str) -> str | None:
+    """The head of a *named* branch — for a crate whose release is a branch."""
+    r = run(["git", "ls-remote", "--heads", f"https://github.com/{repo}", branch])
+    for line in r.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() in (f"refs/heads/{branch}", branch):
+            return sha.strip()
+    return None
+
+
+# ── known gaps ───────────────────────────────────────────────────────────
+#
+# Two of this tool's fetch routes can hand back a *truncated* file and still
+# report success, and one crate in the workspace needs the file they truncate:
+# `glow`'s `src/gl46.rs` is 1.4 MB of generated OpenGL 4.6 bindings, larger
+# than GitHub's contents API will return in one response (it answers with an
+# empty body rather than an error), and the registry-src mirrors that carry
+# `glow-0.13.1` store it as a zero-byte placeholder. Cargo needs it the moment
+# `wgpu`'s Linux `gles` backend is compiled, so a gap is *repaired* here from
+# the crate's own repository branch: the file is generated boilerplate, so the
+# branch and the published tarball agree on its contents (verified by the
+# compiler, which links `native.rs`'s `GlFns` against it).
+_FILE_GAPS: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("glow", "0.13.1", "src/gl46.rs"): ("grovesNL/glow", "0.13"),
+}
+
+
+def restore_known_gaps(vendor: Path) -> int:
+    """Re-fetch the vendored files a truncated mirror left empty or missing.
+
+    Only ever fills a hole: a file that is present and non-empty is left exactly
+    as it came from the mirror, because the mirror is the authoritative source
+    whenever it actually delivered.
+    """
+    restored = 0
+    for (name, version, rel), (repo, ref) in _FILE_GAPS.items():
+        dest = vendor / f"{name}-{version}" / rel
+        if not (vendor / f"{name}-{version}" / "Cargo.toml").exists():
+            continue
+        if dest.exists() and dest.stat().st_size > 0:
+            continue
+        sha = branch_sha(repo, ref)
+        tgz = download(repo, sha) if sha else None
+        if tgz is None:
+            log(f"[gap] {name}@{version}: cannot fetch {rel} from {repo}@{ref}")
+            continue
+        try:
+            with tarfile.open(tgz) as tar:
+                member = next(
+                    (m for m in tar.getmembers()
+                     if m.isfile() and m.name.endswith(f"/{rel}") and name in m.name),
+                    None,
+                )
+                if member is None or member.size == 0:
+                    log(f"[gap] {name}@{version}: {rel} is not in {repo}@{ref}")
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with tar.extractfile(member) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+        except (tarfile.TarError, OSError) as exc:  # noqa: BLE001
+            log(f"[gap] {name}@{version}: {rel} failed to restore: {exc}")
+            continue
+        restored += 1
+        log(f"[gap] {name}@{version}: restored {rel} from {repo}@{ref} "
+            f"({dest.stat().st_size} bytes)")
+    return restored
+
+
 def search_repo(name: str) -> str | None:
     r = run(["gh", "api", f"search/repositories?q={name}+in:name&per_page=8"])
     try:
@@ -1754,6 +1822,7 @@ def main() -> int:
         victims = [v for v in victims if norm(v[0]) in wanted]
     if args.repair_only:
         print(f"repairing {vendor} against {LOCK}")
+        restore_known_gaps(vendor)
         FEATURES.clear()
         FEATURES.update(vendored_features(vendor))
         print(f"repaired {repair_vendored(vendor)} manifests")
@@ -1789,6 +1858,10 @@ def main() -> int:
     # to a better one must not survive the run (cargo would try to vendor it).
     for leftover in vendor.glob(".staging-*"):
         shutil.rmtree(leftover, ignore_errors=True)
+
+    # A truncated mirror is not a missing crate: repair the files the routes
+    # could not deliver before the tree is declared finished (see `_FILE_GAPS`).
+    restore_known_gaps(vendor)
 
     # The tree is complete, so it is now the ground truth for "what does this
     # dependency actually declare". Re-run the manifest rules against it: a

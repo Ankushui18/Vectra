@@ -497,6 +497,16 @@ pub fn geometry_slots(kind: &NodeKind) -> Vec<&'static str> {
         NodeKind::Rectangle { .. } => vec!["x", "y", "width", "height"],
         NodeKind::Circle { .. } => vec!["cx", "cy", "radius"],
         NodeKind::Arc { .. } => vec!["cx", "cy", "radius"],
+        // A text node's `size` prop is its **type size**, not a box: the run's
+        // box is an output of layout, so scaling it means scaling `font_size`
+        // (and, with it, the leading — the leading is a multiple of the size).
+        // `x`/`y` come along so an instance's type stays inside the instance.
+        // A *bound* run has no origin of its own (the path places it), so it
+        // contributes only its size.
+        NodeKind::Text { on_path, .. } => match on_path {
+            None => vec!["x", "y", "font_size"],
+            Some(_) => vec!["font_size"],
+        },
         NodeKind::Path { .. } | NodeKind::Group { .. } => Vec::new(),
     }
 }

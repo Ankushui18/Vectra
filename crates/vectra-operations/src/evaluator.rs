@@ -35,7 +35,7 @@ use vectra_core::{
 };
 use vectra_geometry::{
     path_to_svg_data, Diagnostic, DiagnosticCode, EvaluatedNode, EvaluatedPrimitive,
-    EvaluatedScene, EvaluatedStyle, Severity,
+    EvaluatedScene, EvaluatedStyle, RegionGraph, Severity, SourceSpec,
 };
 
 /// What one operations pass produced.
@@ -126,6 +126,13 @@ impl OperationsEvaluator {
             .get(id)
             .ok_or(OperationError::MissingOperation(id))?;
 
+        // **A Smart Fill is its own pass** (Task 12.0 RULE 2): it reads every
+        // boundary at once plus a seed point, so it cannot be expressed as
+        // "combine these regions pairwise".
+        if let OperationKind::SmartFill { seed, boundaries } = &op.kind {
+            return evaluate_smart_fill(primitives, op, ctx, *seed, boundaries);
+        }
+
         // 1. Fetch the evaluated paths of the inputs and turn them into
         //    regions `geo` can reason about (RULE 2 pipeline, steps 1–2).
         let mut regions: Vec<MultiPolygon<f64>> = Vec::with_capacity(op.inputs.len());
@@ -181,6 +188,9 @@ impl OperationsEvaluator {
                 vectra_core::MirrorAxis::Vertical { at } => at,
                 vectra_core::MirrorAxis::Horizontal { at } => at,
             }),
+            // A region operation's numbers are its seed *point*, which is not a
+            // scalar slot: it is the anchor, not an operand.
+            OperationKind::SmartFill { .. } => None,
         };
         match value {
             None => Ok(vec![None]),
@@ -193,6 +203,57 @@ impl OperationsEvaluator {
                 }),
         }
     }
+}
+
+/// **The Smart Fill pass** (Task 12.0 RULE 2): boundaries → a region graph → the
+/// face the seed is in → one path.
+///
+/// The record stores the boundaries and a point, never a copy of the geometry,
+/// so this function *is* the parametric link: when a boundary moves, the dirty
+/// set reaches the fill's `inputs` (`Document::operations.affected_by`), this
+/// runs again, and the region it paints is the new arrangement's.
+///
+/// The seed is re-tested rather than trusted: boundaries pulled apart leave the
+/// seed in no face at all, and the honest answer there is "empty, and here is
+/// why" — not the nearest face, and not the last one that happened to fit.
+fn evaluate_smart_fill(
+    primitives: &EvaluatedScene,
+    op: &vectra_core::OperationNode,
+    ctx: &EvaluationContext,
+    seed: (f64, f64),
+    boundaries: &[vectra_core::NodeId],
+) -> Result<EvaluatedNode, OperationError> {
+    let mut sources: Vec<SourceSpec> = Vec::with_capacity(boundaries.len());
+    for boundary in boundaries {
+        let node = primitives.get(*boundary).ok_or(OperationError::MissingInput {
+            operation: op.id,
+            input: *boundary,
+        })?;
+        // A boundary that covers no area (an open arc, a hidden shape the
+        // evaluator skipped) is not an error on its own: it simply forms no
+        // face. Only *nothing at all* to intersect is.
+        if let Some(spec) = SourceSpec::from_primitive(*boundary, &node.primitive) {
+            sources.push(spec);
+        }
+    }
+    if sources.is_empty() {
+        return Err(OperationError::NoBoundaries { operation: op.id });
+    }
+    let graph = RegionGraph::build(sources);
+    let Some(index) = graph.face_at(seed) else {
+        return Err(OperationError::SmartFillEmpty {
+            operation: op.id,
+            x: seed.0,
+            y: seed.1,
+        });
+    };
+    Ok(EvaluatedNode {
+        id: op.id,
+        primitive: EvaluatedPrimitive::Path(graph.faces[index].path.clone()),
+        style: resolve_style(&op.style, ctx),
+        visible: true,
+        locked: false,
+    })
 }
 
 /// Style resolution for a virtual node: the same fallbacks the primitive
@@ -211,8 +272,14 @@ fn operation_diagnostic(
     op: &vectra_core::OperationNode,
 ) -> Diagnostic {
     let (code, severity) = match error {
-        OperationError::EmptyInput { .. } => {
+        OperationError::EmptyInput { .. } | OperationError::NoBoundaries { .. } => {
             (DiagnosticCode::OperationEmptyInput, Severity::Warning)
+        }
+        // A Smart Fill that no longer surrounds its seed is a *warning with a
+        // name of its own*: the designer can act on it (move a boundary back),
+        // and it is the signal the panel shows instead of a vanished shape.
+        OperationError::SmartFillEmpty { .. } => {
+            (DiagnosticCode::SmartFillEmpty, Severity::Warning)
         }
         _ => (DiagnosticCode::OperationFailed, Severity::Warning),
     };

@@ -1120,6 +1120,23 @@ export class VectraEngine {
         }
     }
     /**
+     * The families the host's font library can resolve, as a JSON array —
+     * the Text panel's picker. Always non-empty: the bundled face is in it.
+     * @returns {string}
+     */
+    font_families() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.vectraengine_font_families(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Rebuild the whole scene from scratch (the UI's "re-evaluate everything"
      * control). Demonstrably equal to the incremental cache — the app-level
      * witness of `patch ≡ rebuild`.
@@ -1239,6 +1256,39 @@ export class VectraEngine {
         return this;
     }
     /**
+     * **Outline a text node to paths** (Task 11.0 RULE 3): the non-destructive
+     * conversion from type to letterforms.
+     *
+     * Shaping lives in `vectra-geometry`, and `Command::OutlineText` carries a
+     * *plan* rather than a font, so the boundary is where the two meet: it
+     * lays the run out, asks the geometry crate for one closed plan per
+     * letterform, mints the group and letterform ids, and dispatches the command
+     * as **one history entry**. Core never learns what a glyph is; the sketch
+     * from the font never leaves this call.
+     *
+     * The original text node is hidden, never deleted — undo restores it
+     * exactly, and its string and parameters are still there to come back to.
+     * @param {string} node_id
+     * @param {string | null} [name]
+     * @returns {string}
+     */
+    outline_text(node_id, name) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(node_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_outline_text(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * The pointer left the canvas: nothing is hovered any more.
      *
      * A separate entry point rather than a magic off-canvas coordinate, because
@@ -1346,6 +1396,32 @@ export class VectraEngine {
             return getStringFromWasm0(ret[0], ret[1]);
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Register a face for a family name (Task 11.0 RULE 1), as raw bytes.
+     *
+     * Registration is *validating*: bytes that do not parse as a font are
+     * refused and nothing changes, so a bad upload can never become a text node
+     * that silently draws nothing.
+     * @param {string} family
+     * @param {Uint8Array} bytes
+     * @returns {string}
+     */
+    register_font(family, bytes) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(family, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_register_font(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -2396,17 +2472,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 570, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 574, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 595, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 599, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue__core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_e751eaa9cf7806ea___JsError___true_);
             return ret;
         },
         __wbindgen_generic_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 571, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 575, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wgpu_cf189251abdffb5b___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_);
             return ret;
         },
@@ -2644,6 +2720,13 @@ function makeMutClosure(arg0, arg1, f) {
     };
     CLOSURE_DTORS.register(real, state, state);
     return real;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

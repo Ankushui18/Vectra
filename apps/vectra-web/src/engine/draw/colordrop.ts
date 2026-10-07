@@ -7,12 +7,17 @@
  * 1. *find the enclosed area with the existing hit test* — the drop point goes
  *    through `client.pointerHit`, the same renderer-side index a click uses. The
  *    UI computes no region of its own, and it never guesses from coordinates.
- * 2. *dropped on an existing shape → fill that shape* — the shape's **first
+ * 2. *dropped inside an enclosed area → **a new Smart Fill*** (Task 12.0 RULE 4)
+ *    — the region is identified by the engine's region graph and the fill is
+ *    pinned to it: the boundaries and the drop point, not a recoloured shape.
+ *    This is checked *before* the shape test, because a face is what a drop into
+ *    an arrangement means, even when a path also happens to be under the point.
+ * 3. *dropped on an existing shape → fill that shape* — the shape's **first
  *    fill** in the resolved appearance stack is recoloured. That is the fill a
  *    designer sees the drop land on (the bottom of the stack, the one Procreate's
  *    ColorDrop replaces), and every other row is echoed back verbatim, so a
  *    gradient, a stroke and a blend mode survive the drop untouched.
- * 3. *dropped in empty space → nothing* — no hit, no plan, no command, no
+ * 4. *dropped in empty space → nothing* — no hit, no plan, no command, no
  *    history entry. Reported as {@link DropPlan} `noop` with the reason, so the
  *    status line can say why nothing happened instead of looking broken.
  *
@@ -26,10 +31,19 @@
  * command construction in `engine/commands.ts` with its siblings.
  */
 
-import type { SnapshotAppearanceWire, SnapshotPaintWire } from '../wire';
+import { regionDrop, type RegionDrop } from './regions';
+import type { RegionPlanWire, SnapshotAppearanceWire, SnapshotPaintWire } from '../wire';
 
-/** The two facts a drop needs: what is under it, and what was dropped. */
+/**
+ * The three facts a drop can lead to: a **region** to fill (Task 12.0 RULE 4), a
+ * shape to recolour, or nothing.
+ *
+ * `smartFill` is listed first because that is the rule's order: a drop inside an
+ * enclosed area creates a fill *pinned to that region*, and only a drop that
+ * lands in no enclosed area falls through to recolouring the shape beneath it.
+ */
 export type DropPlan =
+  | { kind: 'smartFill'; boundaries: string[]; seed: [number, number]; color: string; name: string }
   | { kind: 'fill'; nodeId: string; color: string }
   | { kind: 'noop'; reason: string };
 
@@ -41,10 +55,41 @@ export type DropPlan =
  * engine's colour parser is strict, and a drop that would send it nonsense should
  * not reach the wire.
  */
-export function planColorDrop(nodeId: string | null, color: string): DropPlan {
-  if (!nodeId) return { kind: 'noop', reason: 'empty space — nothing to fill' };
+export function planColorDrop(
+  nodeId: string | null,
+  color: string,
+  region: RegionDrop | null = null,
+): DropPlan {
   if (!isHexColor(color)) return { kind: 'noop', reason: `not a colour: ${color}` };
+  // RULE 4 first: an enclosed area *is* the answer when the drop is inside one.
+  // The boundaries and the seed are the engine's (see `regionDrop`), so the new
+  // fill lands on the very region the tool would have highlighted.
+  if (region) {
+    return {
+      kind: 'smartFill',
+      boundaries: region.boundaries,
+      seed: region.seed,
+      color,
+      name: region.name,
+    };
+  }
+  if (!nodeId) return { kind: 'noop', reason: 'empty space — nothing to fill' };
   return { kind: 'fill', nodeId, color };
+}
+
+/**
+ * The same rule, one step earlier: **which region did this drop land in?**
+ *
+ * `plan` is the engine's answer for the drop point and `point` is the point
+ * itself; a plan with no hit is a drop in no enclosed area, which is what the
+ * shape test then gets to answer. Exported so the caller reads as the rule does
+ * — region first, shape second — instead of assembling the order itself.
+ */
+export function dropRegion(
+  plan: RegionPlanWire | null,
+  point: [number, number] | null,
+): RegionDrop | null {
+  return regionDrop(plan, point);
 }
 
 /** `#rrggbb` or `#rrggbbaa` — the two shapes the engine's colour takes. */
@@ -109,5 +154,9 @@ export function dropChangesStack(stack: SnapshotAppearanceWire[], color: string)
 /** One line for the status strip: what the drop did, in the designer's words. */
 export function dropStatus(plan: DropPlan, name: string | null): string {
   if (plan.kind === 'noop') return `◧ ColorDrop · ${plan.reason}`;
+  if (plan.kind === 'smartFill') {
+    const boundaries = plan.boundaries.length === 1 ? '1 path' : `${plan.boundaries.length} paths`;
+    return `◧ ColorDrop · new smart fill in the region between ${boundaries} · ${plan.color}`;
+  }
   return `◧ ColorDrop · filled ${name ?? plan.nodeId} with ${plan.color}`;
 }
