@@ -189,6 +189,34 @@ impl HeuristicPlanner {
         "align card and dot vertically",
         "animate the height of card to 100 with a spring",
     ];
+
+    /// The **structural macros** (Task 10.6 RULE 2 and 3), the phrases behind the
+    /// command bar's one-tap chips.
+    ///
+    /// They are listed apart from [`HeuristicPlanner::PHRASINGS`] for one honest
+    /// reason: every one of them needs a selection, so they are not interchangeable
+    /// with the sentences above, and a test can check them against a document
+    /// that *has* one. A prompt that names a macro with nothing selected falls
+    /// through to the sentence grammar and, if it matches nothing there, is
+    /// refused — never guessed at.
+    pub const MACRO_PHRASINGS: [&'static str; 5] = [
+        "make this geometric",
+        "create 4 color variations",
+        "align perfectly",
+        "make this a component",
+        "generate an icon set at 16 32 48",
+    ];
+}
+
+/// Everything the built-in planner understands, for the UI's hint line and for
+/// the failure message. The one list cannot drift from the matcher: the tests in
+/// `tests/ai_laws.rs` run every entry through it.
+pub fn phrasings() -> Vec<&'static str> {
+    HeuristicPlanner::PHRASINGS
+        .iter()
+        .chain(HeuristicPlanner::MACRO_PHRASINGS.iter())
+        .copied()
+        .collect()
 }
 
 impl Planner for HeuristicPlanner {
@@ -273,38 +301,57 @@ impl Clue<'_> {
 
     /// Apply the fixes from [`Clue::absorb`]: rewrite slots, drop commands that
     /// reference banned nodes or repeat a banned command.
+    ///
+    /// Dropping is **transitive**. A macro's plan is a chain — a union reads the
+    /// union before it, a prop write names the instance the command before it
+    /// placed — so dropping one command can orphan the next: the orphan names an
+    /// id nothing creates any more, which is a *second* engine refusal in a plan
+    /// that was supposed to be fixed. So the filter runs to a fixpoint, each
+    /// round collecting the ids the dropped commands would have minted.
     fn apply_fixes(&self, commands: Vec<Command>) -> Vec<Command> {
-        let mut out = Vec::with_capacity(commands.len());
-        for mut command in commands {
-            if let Command::SetParameter {
-                node_id, property, ..
-            } = &mut command
-            {
-                if let Some((_, _, good)) = self
-                    .slot_fixes
-                    .iter()
-                    .find(|(node, bad, _)| node == &node_id.to_string() && bad == property)
+        let mut dropped_ids: Vec<String> = Vec::new();
+        let mut current = commands;
+        loop {
+            let mut kept: Vec<Command> = Vec::with_capacity(current.len());
+            let mut orphaned: Vec<String> = Vec::new();
+            for mut command in current.drain(..) {
+                if let Command::SetParameter {
+                    node_id, property, ..
+                } = &mut command
                 {
-                    *property = good.clone();
+                    if let Some((_, _, good)) = self
+                        .slot_fixes
+                        .iter()
+                        .find(|(node, bad, _)| node == &node_id.to_string() && bad == property)
+                    {
+                        *property = good.clone();
+                    }
                 }
+                let rendered = serde_json::to_value(&command)
+                    .ok()
+                    .and_then(|value| serde_json::to_string(&value).ok())
+                    .unwrap_or_default();
+                let banned = self.banned_commands.contains(&rendered)
+                    || self
+                        .banned_ids
+                        .iter()
+                        .any(|id| rendered.contains(id.as_str()))
+                    || dropped_ids.iter().any(|id| rendered.contains(id.as_str()));
+                if banned {
+                    if let Some(id) = crate::schema::created_id(&command) {
+                        orphaned.push(id);
+                    }
+                    continue;
+                }
+                kept.push(command);
             }
-            let rendered = serde_json::to_value(&command)
-                .ok()
-                .and_then(|value| serde_json::to_string(&value).ok())
-                .unwrap_or_default();
-            if self.banned_commands.contains(&rendered) {
-                continue;
+            let stable = orphaned.is_empty();
+            dropped_ids.extend(orphaned);
+            current = kept;
+            if stable {
+                return current;
             }
-            if self
-                .banned_ids
-                .iter()
-                .any(|id| rendered.contains(id.as_str()))
-            {
-                continue;
-            }
-            out.push(command);
         }
-        out
     }
 
     /// Parse the instruction into command JSON.
@@ -318,6 +365,16 @@ impl Clue<'_> {
         }
         // Pair and chain verbs first: "union card and dot" must not be split.
         if let Some(commands) = self.pair(&text) {
+            return Ok(commands);
+        }
+        // ── Task 10.6: the structural macros (RULE 2) ──────────────────────
+        //
+        // These are the prompts that talk about *the selection*: "make this
+        // geometric", "create 4 colour variations", "align perfectly", "make
+        // this a component", "generate an icon set at 16 32 48". They are
+        // tried before the sentence grammar because their subject is the
+        // canvas, not a name the grammar could look up.
+        if let Some(commands) = self.macro_plan(&text)? {
             return Ok(commands);
         }
         let mut all = Vec::new();
@@ -344,6 +401,325 @@ impl Clue<'_> {
             ));
         }
         Ok(all)
+    }
+
+    /// **The structural macros** (Task 10.6 RULE 2): a prompt about the
+    /// selection, answered with strictly typed commands.
+    ///
+    /// Never pixels, never SVG, never a picture: every arm below returns JSON
+    /// commands that go through the same [`crate::schema::compile_plan`] gate as
+    /// any other plan, so a macro the engine rejects is corrected (or refused)
+    /// exactly like a sentence is.
+    ///
+    /// `None` means "not a macro", and the sentence grammar gets its turn.
+    /// A structural macro, if the prompt names one and the selection supports it.
+    ///
+    /// `Ok(None)` means "not a macro, try the sentence grammar". `Err` means the
+    /// prompt *did* name a macro but the selection cannot support it — a typed
+    /// refusal with a sentence a designer can act on is better than falling
+    /// through to "I don't know that phrasing", which would be a lie: the macro
+    /// was understood perfectly well.
+    fn macro_plan(&mut self, text: &str) -> Result<Option<Vec<Value>>, AiError> {
+        let lower = text.to_lowercase();
+        let selected: Vec<SummaryNode> = self.summary.selected().into_iter().cloned().collect();
+        let numbers = numbers_in(text);
+
+        // ── Icon Studio (RULE 3) ────────────────────────────────────────────
+        // "generate an icon set at 16 32 48": one master, one instance per size,
+        // each on its own artboard, all scaled by the same law — the stroke
+        // never thins into a hairline at 16px. This is the JSON face of
+        // `vectra_core::component::icon_set_plan`; a macro cannot call that
+        // helper directly, because it mints ids up front and a plan's ids have
+        // to stay `$new:` tokens until the engine resolves them.
+        if !selected.is_empty()
+            && (lower.contains("icon set")
+                || lower.contains("icon-set")
+                || lower.contains("icon sizes"))
+        {
+            let sizes: Vec<f64> = {
+                let picked: Vec<f64> = numbers
+                    .iter()
+                    .copied()
+                    .filter(|size| *size >= 4.0 && *size <= 512.0)
+                    .collect();
+                if picked.is_empty() {
+                    vec![16.0, 32.0, 48.0]
+                } else {
+                    picked
+                }
+            };
+            let mut commands = vec![self.component_json(&selected)];
+            commands.extend(icon_set_json(&selected[0].name, &sizes));
+            let smallest = sizes.iter().copied().fold(f64::INFINITY, f64::min);
+            self.notes.push(format!(
+                "built an icon master from \u{201c}{}\u{201d} at {} \u{2014} stroke and corner \
+                 radius scale with each artboard, so nothing thins out at {}px",
+                selected[0].name,
+                sizes
+                    .iter()
+                    .map(|size| format!("{}px", trim(*size)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                trim(smallest),
+            ));
+            return Ok(Some(commands));
+        }
+
+        // ── Smart Component (RULE 1) ────────────────────────────────────────
+        if !selected.is_empty()
+            && (lower.contains("make this a component")
+                || lower.contains("make it a component")
+                || lower.contains("create a component")
+                || lower.contains("create component")
+                || lower.contains("componentise")
+                || lower.contains("componentize"))
+        {
+            self.notes.push(format!(
+                "turned {} into a component \u{2014} Size, Stroke, Corner and Color are now props \
+                 you can set per instance",
+                self.summary.selection_prose()
+            ));
+            return Ok(Some(vec![self.component_json(&selected)]));
+        }
+
+        // ── Colour variations ───────────────────────────────────────────────
+        if lower.contains("variation")
+            || lower.contains("colour version")
+            || lower.contains("color version")
+        {
+            if selected.is_empty() {
+                // Nothing selected: "this" has no referent, so the sentence
+                // grammar gets its turn (it will refuse with its own message).
+                return Ok(None);
+            }
+            let count = numbers
+                .iter()
+                .copied()
+                .find(|count| *count >= 2.0 && *count <= 8.0)
+                .map(|count| count.round() as usize)
+                .unwrap_or(4);
+            let base = selected
+                .iter()
+                .find_map(|node| slot_source(node, "style.fill"))
+                .and_then(|hex| vectra_core::Color::from_hex(&hex))
+                .unwrap_or_else(|| vectra_core::Color::rgb(0x22, 0x66, 0xee));
+            let palette = hue_palette(base, count);
+            let mut commands = Vec::new();
+            // Variation 1 *is* the original — the family's reference colour.
+            for (index, fill) in palette.iter().enumerate().skip(1) {
+                for (order, node) in selected.iter().enumerate() {
+                    let copy = format!("$new:variation:{index}:{order}");
+                    commands.push(json!({
+                        "type": "DuplicateNode",
+                        "id": copy,
+                        "source": node.id,
+                        "name": format!("{} {}", node.name, index + 1),
+                    }));
+                    if let Some((slot, value)) = position_slot(node) {
+                        let step = size_slot(node).unwrap_or(24.0) + 16.0;
+                        commands.push(json!({
+                            "type": "SetParameter",
+                            "node_id": copy,
+                            "property": slot,
+                            "value": {"Float": {"Literal": value + step * index as f64}},
+                        }));
+                    }
+                    if node.slots.iter().any(|slot| slot.property == "style.fill") {
+                        commands.push(json!({
+                            "type": "SetParameter",
+                            "node_id": copy,
+                            "property": "style.fill",
+                            "value": {"Color": {"Literal": fill}},
+                        }));
+                    }
+                }
+            }
+            if commands.is_empty() {
+                return Ok(None);
+            }
+            self.notes.push(format!(
+                "made {count} colour variation(s) of {} \u{2014} {} command(s), all of them \
+                 editable shapes",
+                self.summary.selection_prose(),
+                commands.len()
+            ));
+            return Ok(Some(commands));
+        }
+
+        // ── Make it geometric ───────────────────────────────────────────────
+        if lower.contains("geometric")
+            || lower.contains("geometrise")
+            || lower.contains("geometrize")
+        {
+            if selected.is_empty() {
+                // Nothing selected: "this" has no referent, so the sentence
+                // grammar gets its turn (it will refuse with its own message).
+                return Ok(None);
+            }
+            let mut commands = Vec::new();
+            let mut unified = 0usize;
+            for node in &selected {
+                // 1. Whole-number geometry: art that sits on the grid.
+                for (property, value) in snap_slots(node) {
+                    commands.push(json!({
+                        "type": "SetParameter",
+                        "node_id": node.id,
+                        "property": property,
+                        "value": {"Float": {"Literal": value}},
+                    }));
+                }
+                // 2. Sharp corners: a radius is a deliberate softening, and this
+                //    prompt is the request to remove it.
+                if node
+                    .slots
+                    .iter()
+                    .any(|slot| slot.property == "corner_radius")
+                {
+                    commands.push(json!({
+                        "type": "SetParameter",
+                        "node_id": node.id,
+                        "property": "corner_radius",
+                        "value": {"Float": {"Literal": 0.0}},
+                    }));
+                }
+            }
+            // 3. One shape, not several overlapping ones: a boolean union of the
+            //    first two. Two is the engine's arity — a boolean takes a subject
+            //    and a clip — and an operation cannot yet read another operation,
+            //    so a chain that folded *all* of the selection in one press would
+            //    be a plan the engine refuses. The macro therefore unifies the
+            //    pair and says so; the next shape folds in on the next run.
+            if let [first, second, ..] = selected.as_slice() {
+                commands.push(json!({
+                    "type": "ApplyOperation",
+                    "id": "$new:op:union:0",
+                    "kind": {"type": "boolean", "op": "union"},
+                    "inputs": [first.id, second.id],
+                }));
+                unified += 1;
+            }
+            if commands.is_empty() {
+                return Ok(None);
+            }
+            let fold = if unified == 0 {
+                String::new()
+            } else if selected.len() > 2 {
+                // Honest about the arity: the designer asked for one shape and
+                // gets one union, so the sentence says which pair it joined.
+                format!(
+                    " and unified \u{201c}{}\u{201d} with \u{201c}{}\u{201d} (a union takes two \
+                     shapes; the rest are snapped and ready to fold in next)",
+                    selected[0].name, selected[1].name
+                )
+            } else {
+                " and unified them into one shape".to_string()
+            };
+            self.notes.push(format!(
+                "snapped {} to whole numbers{} \u{2014} {} command(s)",
+                self.summary.selection_prose(),
+                fold,
+                commands.len()
+            ));
+            return Ok(Some(commands));
+        }
+
+        // ── Align perfectly ─────────────────────────────────────────────────
+        if lower.contains("align") {
+            if selected.is_empty() {
+                // Nothing selected: "this" has no referent, so the sentence
+                // grammar gets its turn (it will refuse with its own message).
+                return Ok(None);
+            }
+            if selected.len() < 2 {
+                // Understood, but impossible: aligning a column needs two shapes,
+                // and the honest answer says so rather than asking the designer to
+                // rephrase a sentence the planner already parsed.
+                return Err(AiError::Unrecognized {
+                    prompt: text.to_string(),
+                    detail: "aligning needs at least two shapes \u{2014} select another one and try again"
+                        .to_string(),
+                });
+            }
+            let mut commands = Vec::new();
+            let anchor = &selected[0];
+            let (anchor_x, _) = axis_slots(anchor);
+            // Every other selected node shares the anchor's column …
+            for (index, node) in selected.iter().skip(1).enumerate() {
+                let (x_slot, _) = axis_slots(node);
+                commands.push(json!({
+                    "type": "AddConstraint",
+                    "constraint": {
+                        // One placeholder per constraint: a `$new:` slug mints
+                        // **one** id and reuses it, so a shared slug would make
+                        // every constraint in the column the same constraint.
+                        "id": format!("$new:constraint:column:{index}"),
+                        "kind": "vertical",
+                        "targets": [
+                            {"node_id": anchor.id, "property": anchor_x},
+                            {"node_id": node.id, "property": x_slot},
+                        ],
+                        "strength": "required",
+                        "value": Value::Null,
+                    },
+                }));
+            }
+            // … and, with three or more, the rows keep the spacing they have:
+            // "perfectly" means a column, not a pile.
+            if selected.len() >= 3 {
+                let ys: Vec<f64> = selected
+                    .iter()
+                    .filter_map(|node| slot_number(node, axis_slots(node).1))
+                    .collect();
+                for (index, node) in selected.iter().enumerate().skip(2) {
+                    let previous = &selected[index - 1];
+                    let (_, y_slot) = axis_slots(node);
+                    let (_, y_previous) = axis_slots(previous);
+                    let gap = match (ys.get(index - 1), ys.get(index)) {
+                        (Some(before), Some(after)) => *before - *after,
+                        _ => continue,
+                    };
+                    commands.push(json!({
+                        "type": "AddConstraint",
+                        "constraint": {
+                            // One placeholder per constraint — see the column
+                            // constraints above.
+                            "id": format!("$new:constraint:spacing:{index}"),
+                            "kind": "parallel",
+                            "targets": [
+                                {"node_id": previous.id, "property": y_previous},
+                                {"node_id": node.id, "property": y_slot},
+                            ],
+                            "strength": "required",
+                            "value": gap,
+                        },
+                    }));
+                }
+            }
+            if commands.is_empty() {
+                return Ok(None);
+            }
+            self.notes.push(format!(
+                "aligned {} into a column \u{2014} {} constraint(s), applied",
+                self.summary.selection_prose(),
+                commands.len()
+            ));
+            return Ok(Some(commands));
+        }
+
+        Ok(None)
+    }
+
+    /// The `CreateComponent` command for a set of nodes, as plan JSON.
+    fn component_json(&self, members: &[SummaryNode]) -> Value {
+        json!({
+            "type": "CreateComponent",
+            "id": "$new:component",
+            "name": members
+                .first()
+                .map(|node| format!("{} component", node.name))
+                .unwrap_or_else(|| "Component".to_string()),
+            "members": members.iter().map(|node| node.id.clone()).collect::<Vec<_>>(),
+        })
     }
 
     /// Give a subject-less clause the shape the previous clause was about.
@@ -1195,4 +1571,185 @@ fn closest_slot(kind: &str, property: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ── Task 10.6 macro helpers ─────────────────────────────────────────────────
+
+/// The numeric value of a slot, whether the summary recorded it or only wrote
+/// its source (`"24"`).
+fn slot_number(node: &SummaryNode, property: &str) -> Option<f64> {
+    let slot = node.slots.iter().find(|slot| slot.property == property)?;
+    if let Some(value) = slot.value {
+        return Some(value);
+    }
+    let source = slot.source.trim();
+    if let Some((_, tail)) = source.rsplit_once('*') {
+        if let Ok(value) = tail.trim().parse::<f64>() {
+            return Some(value);
+        }
+    }
+    source.parse::<f64>().ok()
+}
+
+/// The raw source of a slot (`"#2266ee"` for a colour, `"$base"` for a
+/// variable) — the summary's own spelling, never a re-render.
+fn slot_source(node: &SummaryNode, property: &str) -> Option<String> {
+    node.slots
+        .iter()
+        .find(|slot| slot.property == property)
+        .map(|slot| slot.source.trim().to_string())
+}
+
+/// Whether the node's position lives in `x/y` or `cx/cy`.
+fn axis_slots(node: &SummaryNode) -> (&'static str, &'static str) {
+    if node.kind == "Circle" || node.kind == "Arc" {
+        ("cx", "cy")
+    } else {
+        ("x", "y")
+    }
+}
+
+/// `(slot, current value)` for the node's first position axis.
+fn position_slot(node: &SummaryNode) -> Option<(&'static str, f64)> {
+    let (x_slot, y_slot) = axis_slots(node);
+    if let Some(value) = slot_number(node, x_slot) {
+        return Some((x_slot, value));
+    }
+    slot_number(node, y_slot).map(|value| (y_slot, value))
+}
+
+/// The magnitude a variation is laid out by: width, height or diameter.
+fn size_slot(node: &SummaryNode) -> Option<f64> {
+    for property in ["width", "height", "radius"] {
+        if let Some(value) = slot_number(node, property) {
+            return Some(if property == "radius" {
+                value * 2.0
+            } else {
+                value
+            });
+        }
+    }
+    None
+}
+
+/// Every position slot, snapped to whole numbers (only the ones the node has).
+fn snap_slots(node: &SummaryNode) -> Vec<(&'static str, f64)> {
+    let (x_slot, y_slot) = axis_slots(node);
+    let mut out = Vec::new();
+    for slot in [x_slot, y_slot] {
+        if let Some(value) = slot_number(node, slot) {
+            out.push((slot, value.round()));
+        }
+    }
+    out
+}
+
+/// `count` colours from the same family as `base`: even hue steps around the
+/// wheel at the same saturation and lightness (RULE 2's "Create 4 color
+/// variations" asks for a palette, not four random colours).
+fn hue_palette(base: vectra_core::Color, count: usize) -> Vec<vectra_core::Color> {
+    let (h, s, l) = rgb_to_hsl(
+        base.r as f64 / 255.0,
+        base.g as f64 / 255.0,
+        base.b as f64 / 255.0,
+    );
+    (0..count)
+        .map(|index| {
+            let hue = (h + index as f64 * 360.0 / count.max(1) as f64).rem_euclid(360.0);
+            let (r, g, b) = hsl_to_rgb(hue, s, l);
+            vectra_core::Color::rgba(
+                (r * 255.0).round() as u8,
+                (g * 255.0).round() as u8,
+                (b * 255.0).round() as u8,
+                base.a,
+            )
+        })
+        .collect()
+}
+
+fn rgb_to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let lightness = (max + min) / 2.0;
+    if (max - min).abs() < 1e-12 {
+        return (0.0, 0.0, lightness);
+    }
+    let delta = max - min;
+    let saturation = if lightness > 0.5 {
+        delta / (2.0 - max - min)
+    } else {
+        delta / (max + min)
+    };
+    let hue = if max == r {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    (hue.rem_euclid(360.0), saturation, lightness)
+}
+
+fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (f64, f64, f64) {
+    let c = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let h = hue / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = lightness - c / 2.0;
+    (r + m, g + m, b + m)
+}
+
+/// The **Icon Studio** body of a macro: one instance per size, each on its own
+/// square artboard, each scaled through the master's `size` prop (RULE 3).
+///
+/// Laid out left to right with the same 16px gutter `icon_set_plan` uses, so the
+/// macro and the panel button produce identical documents.
+fn icon_set_json(master_name: &str, sizes: &[f64]) -> Vec<Value> {
+    let mut commands = Vec::new();
+    let mut cursor = 0.0f64;
+    for size in sizes {
+        let board = format!("$new:board:{}", trim(*size));
+        let layer = format!("$new:layer:{}", trim(*size));
+        let instance = format!("$new:instance:{}", trim(*size));
+        let label = format!("{} {}", master_name, trim(*size));
+        commands.push(json!({
+            "type": "CreateArtboard",
+            "id": board,
+            "name": label,
+            "x": cursor,
+            "y": 0.0,
+            "width": size,
+            "height": size,
+            "background": {"r": 255, "g": 255, "b": 255, "a": 255},
+        }));
+        commands.push(json!({
+            "type": "CreateLayer",
+            "id": layer,
+            "name": label,
+            "index": Value::Null,
+            "artboard": board,
+        }));
+        commands.push(json!({
+            "type": "InstantiateComponent",
+            "id": instance,
+            "master": "$new:component",
+            "name": format!("{}px", trim(*size)),
+            "index": Value::Null,
+        }));
+        commands.push(json!({
+            "type": "SetComponentProp",
+            "target": instance,
+            "prop": "size",
+            "value": {"Float": {"Literal": size}},
+        }));
+        cursor += size + 16.0;
+    }
+    commands
 }

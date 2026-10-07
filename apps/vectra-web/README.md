@@ -24,6 +24,20 @@ npm run build
 `wasm-bindgen` CLI version must match `Cargo.lock` exactly —
 `build-wasm.sh` enforces this (install hint on mismatch).
 
+If the CLI **cannot be installed** (a sandbox that can reach its sources but not
+its release assets), `scripts/wbgen/` is a driver that links the CLI's own
+library and applies the same `--target web` settings:
+
+```bash
+CARGO_HOME=<cargo home with the CLI's closure vendored> cargo run --release \
+  --manifest-path scripts/wbgen/Cargo.toml -- \
+  ../../target/wasm32-unknown-unknown/debug/vectra_wasm.wasm src/wasm vectra_wasm
+```
+
+It generates the same four artifacts (`vectra_wasm.js`, `vectra_wasm.d.ts`, the
+binary and its `.d.ts`); `src/main.rs` lists the flags it sets and what it
+deliberately does not do (node targets, the test runner).
+
 ## The loop (MES §16)
 
 1. Click **+ Circle** → `commands.createCircle()` builds the full typed

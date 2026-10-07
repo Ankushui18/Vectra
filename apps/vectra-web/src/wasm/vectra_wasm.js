@@ -549,6 +549,46 @@ export class VectraEngine {
         }
     }
     /**
+     * The Smart Component inspector's whole world: what the selection is, and
+     * every prop it exposes (Task 10.6 RULE 1, RULE 4).
+     * @returns {string}
+     */
+    component_view() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.vectraengine_component_view(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * **Create Component** (RULE 1): the selected nodes become a master whose
+     * props every instance will set for itself.
+     * @param {string} members_json
+     * @param {string | null} [name]
+     * @returns {string}
+     */
+    create_component(members_json, name) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(members_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_create_component(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * The dependency graph, for the inspector panel.
      * @returns {string}
      */
@@ -1118,6 +1158,51 @@ export class VectraEngine {
         }
     }
     /**
+     * **Generate Icon Set** (RULE 3): one instance per size, each on its own
+     * artboard, all scaled by the master's `size` prop.
+     * @param {string} master
+     * @param {string} sizes_json
+     * @returns {string}
+     */
+    icon_set(master, sizes_json) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(master, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(sizes_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_icon_set(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * **Place an instance** of a component (RULE 1).
+     * @param {string} master
+     * @param {string | null} [name]
+     * @returns {string}
+     */
+    instantiate_component(master, name) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(master, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_instantiate_component(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * **The idle signal** (Frame Budget Law): `false` means the document is at
      * rest at the current clock, so the React frame loop must stop scheduling
      * `render_frame` until something moves again.
@@ -1206,13 +1291,6 @@ export class VectraEngine {
         }
     }
     /**
-     * The procedural graph, for the Procedural panel and the smoke harness.
-     *
-     * Three things the panel cannot get anywhere else: the registry's own
-     * order (a chain has a direction, a JSON object does not), each operand's
-     * **effective** value (`(variable)`, not the number the template started
-     * with — see `ProceduralNode::describe`), and the value each output port
-     * last published.
      * @returns {string}
      */
     procedural_json() {
@@ -1320,6 +1398,35 @@ export class VectraEngine {
         }
     }
     /**
+     * **Set one prop on one instance** (RULE 1) — the slider the panel draws.
+     *
+     * `value_json` is a typed [`vectra_core::ParamValue`]
+     * (`{"Float":{"Literal":32}}` / `{"Color":{"Literal":"#2266ee"}}`), which
+     * is exactly what `component_view` publishes per prop type.
+     * @param {string} target
+     * @param {string} prop
+     * @param {string} value_json
+     * @returns {string}
+     */
+    set_component_prop(target, prop, value_json) {
+        let deferred4_0;
+        let deferred4_1;
+        try {
+            const ptr0 = passStringToWasm0(target, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(prop, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_set_component_prop(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            deferred4_0 = ret[0];
+            deferred4_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        }
+    }
+    /**
      * Register or replace a keyframe track (undoable document state).
      *
      * Takes the track as JSON so the wire schema lives in one place
@@ -1334,6 +1441,37 @@ export class VectraEngine {
             const ptr0 = passStringToWasm0(track_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
             const ret = wasm.vectraengine_set_motion_track(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * The procedural graph, for the Procedural panel and the smoke harness.
+     *
+     * Three things the panel cannot get anywhere else: the registry's own
+     * order (a chain has a direction, a JSON object does not), each operand's
+     * **effective** value (`(variable)`, not the number the template started
+     * with — see `ProceduralNode::describe`), and the value each output port
+     * last published.
+     * Tell the engine what the designer has selected.
+     *
+     * The selection is *state*, not a command: it is not undoable, it does not
+     * touch the document, and it exists so that a Make Magic prompt can mean
+     * "this". The reply carries the panel's one-line description, so the UI
+     * never has to compose a sentence about ids.
+     * @param {string} ids_json
+     * @returns {string}
+     */
+    set_selection(ids_json) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(ids_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.vectraengine_set_selection(this.__wbg_ptr, ptr0, len0);
             deferred2_0 = ret[0];
             deferred2_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
@@ -1383,6 +1521,23 @@ export class VectraEngine {
         let deferred1_1;
         try {
             const ret = wasm.vectraengine_set_time(this.__wbg_ptr, t);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * The structural macros the command bar offers as one-tap chips (RULE 2):
+     * the prompt text, plus what it will do, in the designer's words.
+     * @returns {string}
+     */
+    structural_macros() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.vectraengine_structural_macros(this.__wbg_ptr);
             deferred1_0 = ret[0];
             deferred1_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
@@ -1991,7 +2146,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined_______true_(a, state0.b, arg0, arg1);
+                        return wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined_______true_(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2065,7 +2220,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___bool__true_(a, state0.b, );
+                        return wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___bool__true_(a, state0.b, );
                     } finally {
                         state0.a = a;
                     }
@@ -2241,18 +2396,18 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 568, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue______true_);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 570, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 593, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue__core_608f92abc48d28da___result__Result_____wasm_bindgen_2ad7bc35cc533b99___JsError___true_);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 595, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue__core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_e751eaa9cf7806ea___JsError___true_);
             return ret;
         },
         __wbindgen_generic_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 569, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wgpu_d00bd68c658e9b86___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 571, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wgpu_cf189251abdffb5b___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000004: function(arg0) {
@@ -2286,28 +2441,28 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___bool__true_(arg0, arg1) {
-    const ret = wasm.wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___bool__true_(arg0, arg1);
+function wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___bool__true_(arg0, arg1) {
+    const ret = wasm.wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___bool__true_(arg0, arg1);
     return ret !== 0;
 }
 
-function wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue______true_(arg0, arg1, arg2) {
-    wasm.wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue______true_(arg0, arg1, arg2);
+function wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue______true_(arg0, arg1, arg2) {
+    wasm.wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue______true_(arg0, arg1, arg2);
 }
 
-function wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wgpu_d00bd68c658e9b86___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_(arg0, arg1, arg2) {
-    wasm.wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wgpu_d00bd68c658e9b86___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_(arg0, arg1, arg2);
+function wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wgpu_cf189251abdffb5b___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_(arg0, arg1, arg2) {
+    wasm.wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wgpu_cf189251abdffb5b___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_(arg0, arg1, arg2);
 }
 
-function wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue__core_608f92abc48d28da___result__Result_____wasm_bindgen_2ad7bc35cc533b99___JsError___true_(arg0, arg1, arg2) {
-    const ret = wasm.wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue__core_608f92abc48d28da___result__Result_____wasm_bindgen_2ad7bc35cc533b99___JsError___true_(arg0, arg1, arg2);
+function wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue__core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_e751eaa9cf7806ea___JsError___true_(arg0, arg1, arg2) {
+    const ret = wasm.wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue__core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_e751eaa9cf7806ea___JsError___true_(arg0, arg1, arg2);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
 
-function wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined_______true_(arg0, arg1, arg2, arg3) {
-    wasm.wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined_______true_(arg0, arg1, arg2, arg3);
+function wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined_______true_(arg0, arg1, arg2, arg3) {
+    wasm.wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined_______true_(arg0, arg1, arg2, arg3);
 }
 
 

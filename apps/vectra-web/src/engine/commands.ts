@@ -546,6 +546,40 @@ export function setNodeVisible(id: string, visible: boolean): CommandWire {
   return { type: 'SetNodeVisible', id, visible };
 }
 
+// ── Task 10.7: the "Procreate" layer (gestures, alpha lock, clipping) ──────
+//
+// Four builders: the two layer flags RULE 3 adds, the copy primitive the
+// three-finger swipe needs (there is no `Copy`/`Paste` command in the engine —
+// `DuplicateNode` *is* the copy, and duplicating is what a paste produces), and
+// nothing else. A gesture must never grow a wire shape of its own.
+
+/** **Copy / Paste**, as the engine's one copy primitive: a `DuplicateNode` for
+ *  the selection, placed just above its source.
+ *
+ *  The id is generated here because `DuplicateNode` carries the *new* node's id
+ *  (`crypto.randomUUID()`, the same UUIDv4 the engine's own `new_node_id()`
+ *  allocates). The name is left to the engine, which suffixes the source's. */
+export function duplicateNode(source: string, name?: string): CommandWire {
+  return {
+    type: 'DuplicateNode',
+    id: crypto.randomUUID(),
+    source,
+    ...(name ? { name } : {}),
+  };
+}
+
+/** **Alpha Lock** (RULE 3a): new artwork on this layer is clipped to what the
+ *  layer already holds. A flag with its own history entry, like the eye. */
+export function setLayerAlphaLocked(id: string, alpha_locked: boolean): CommandWire {
+  return { type: 'SetLayerAlphaLocked', id, alpha_locked };
+}
+
+/** **Clipping Mask** (RULE 3b): this layer shows only where it overlaps the
+ *  layer below. */
+export function setLayerClippingMask(id: string, clipping_mask: boolean): CommandWire {
+  return { type: 'SetLayerClippingMask', id, clipping_mask };
+}
+
 export function setNodeLocked(id: string, locked: boolean): CommandWire {
   return { type: 'SetNodeLocked', id, locked };
 }

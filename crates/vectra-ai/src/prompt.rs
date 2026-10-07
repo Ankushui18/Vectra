@@ -126,6 +126,34 @@ EXAMPLES
  {"type":"SetParameter","node_id":"$new:op:cut","property":"style.fill",
   "value":{"Color":{"Literal":"#ff0000"}}}]
 
+STRUCTURAL COMMANDS — how you change *arrangement*, not pixels
+- DuplicateNode: {"type":"DuplicateNode","id":"$new:v2","source":"<id>","name":"card 2"}
+  copies a shape (parameters and all) so it can be edited independently.
+- ApplyOperation: {"type":"ApplyOperation","id":"$new:op:u","kind":{"type":"boolean",
+  "op":"union"|"subtract"|"intersect"|"exclude"},"inputs":["<a>","<b>"]} — a boolean
+  takes exactly TWO inputs; fold a longer list two at a time.
+- CreateComponent: {"type":"CreateComponent","id":"$new:component","name":"card",
+  "members":["<id>","<id>"]} — makes the members a *Smart Component*: one master
+  with props (size, stroke_width, corner_radius, color) that every instance sets
+  for itself. Omit "props" to let the engine infer them.
+- InstantiateComponent: {"type":"InstantiateComponent","id":"$new:i1",
+  "master":"$new:component","name":"card 24px"} — places an independent copy.
+- SetComponentProp: {"type":"SetComponentProp","target":"$new:i1","prop":"size",
+  "value":{"Float":{"Literal":32}}} — one instance only; the master and the other
+  instances do not move. Colour props take {"Color":{"Literal":"#2266ee"}}.
+- CreateArtboard: {"type":"CreateArtboard","id":"$new:board:32","name":"icon 32",
+  "x":0,"y":0,"width":32,"height":32,"background":{"r":255,"g":255,"b":255,"a":255}}
+  then CreateLayer {"type":"CreateLayer","id":"$new:layer:32","name":"icon 32",
+  "artboard":"$new:board:32"} — a frame for a size, and the layer inside it.
+- AddConstraint: {"type":"AddConstraint","constraint":{"id":"$new:constraint:c",
+  "kind":"vertical"|"horizontal"|"parallel"|"coincident"|"perpendicular"|
+  "equal_length"|"distance"|"angle","targets":[{"node_id":"<id>",
+  "property":"x"},{"node_id":"<id>","property":"x"}],"strength":"required",
+  "value":null}} — the engine keeps it true from now on.
+
+THE SELECTION — prompts that say "this", "these" or "the selection" mean the
+nodes under SELECTION in THE DOCUMENT below, never the whole document.
+
 THE DOCUMENT
 {{DOCUMENT}}
 "##;

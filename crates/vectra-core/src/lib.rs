@@ -21,6 +21,7 @@
 //! Geometry, logic, and motion are the same editable system.
 
 pub mod command;
+pub mod component;
 pub mod constraint;
 pub mod document;
 pub mod engine;
@@ -36,6 +37,11 @@ pub mod style;
 pub mod summary;
 
 pub use command::{Command, CommandStack, EngineEvent, HistoryEntry};
+pub use component::{
+    bind_plan, design_size, icon_set_plan, infer_props, inspect, is_instance, is_master, master_of,
+    members_of, owner_of, spec_of, BindPlan, ComponentProp, ComponentSpec, ComponentView, PropLaw,
+    PropTarget, PropType, PropView, ScaledTarget, SlotWrite, DEFAULT_ICON_SIZES, ICON_GUTTER,
+};
 pub use constraint::{Constraint, ConstraintKind, ConstraintRegistry, ConstraintTarget, Strength};
 pub use document::{
     Document, ExpressionRecord, Keyframe, MotionTrack, MotionTrackRegistry, Node, NodeKind,
@@ -49,8 +55,9 @@ pub use eval::{
 };
 pub use geom::{Color, Point2};
 pub use ids::{
-    new_constraint_id, new_expression_id, new_node_id, new_operation_id, parse_node_id,
-    ConstraintId, ExpressionId, NodeId, OperationId, PortId, TrackId, VariableId,
+    new_artboard_id, new_constraint_id, new_expression_id, new_layer_id, new_node_id,
+    new_operation_id, parse_node_id, ArtboardId, ConstraintId, ExpressionId, LayerId, NodeId,
+    OperationId, PortId, TrackId, VariableId,
 };
 pub use layers::{ArtboardRecord, ArtboardRegistry, LayerRecord, LayerRegistry};
 pub use operation::{

@@ -7,6 +7,12 @@
 # boundary is a few string-in/string-out methods, so wasm-pack's npm-packaging
 # layer buys nothing here. The CLI version MUST match Cargo.lock exactly;
 # this script enforces that before building.
+#
+# If the CLI cannot be installed, `scripts/wbgen/` is a stand-in *driver* that
+# links the CLI's own library (`wasm-bindgen-cli-support`) and applies the same
+# `--target web` settings; it exists because some sandboxes can reach the CLI's
+# sources but not its release assets. See its `src/main.rs` for the flags and
+# for what it deliberately does not do (node targets, the test runner).
 set -euo pipefail
 
 PROFILE="${1:-debug}"
@@ -21,6 +27,10 @@ fi
 if ! command -v wasm-bindgen >/dev/null 2>&1; then
   echo "error: wasm-bindgen CLI not found. Install the lockfile-pinned version:" >&2
   echo "  cargo install wasm-bindgen-cli --version $LOCK_VERSION" >&2
+  echo "  (if the CLI cannot be installed here, scripts/wbgen links the CLI's own" >&2
+  echo "   library and applies the same --target web settings:" >&2
+  echo "     cargo run --release --manifest-path $ROOT/apps/vectra-web/scripts/wbgen/Cargo.toml -- \\" >&2
+  echo "       <the wasm built above> $OUT vectra_wasm)" >&2
   exit 1
 fi
 CLI_VERSION="$(wasm-bindgen --version | awk '{print $2}')"

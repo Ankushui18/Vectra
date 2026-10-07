@@ -64,6 +64,12 @@ await build({
   logLevel: 'warning',
 });
 
-// 3. Run.
-const run = spawnSync('node', ['--test', 'dist/'], { cwd: root, stdio: 'inherit' });
+// 3. Run. The bundles are named explicitly: `node --test dist/` only expands a
+//    directory on some Node versions (22.22 treats the argument as a file and
+//    dies with MODULE_NOT_FOUND), while one bundle per entry point is the same
+//    set of tests on every version.
+const bundles = tests.map((name) =>
+  join('dist', name.replace(/^tests[/\\]/, '').replace(/\.tsx?$/, '.mjs')).replace(/\\/g, '/'),
+);
+const run = spawnSync('node', ['--test', ...bundles], { cwd: root, stdio: 'inherit' });
 process.exit(run.status ?? 1);

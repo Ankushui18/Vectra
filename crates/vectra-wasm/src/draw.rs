@@ -53,6 +53,10 @@ use vectra_core::{
 use vectra_draw::{
     brush_stroke, plan_quick_shape, Anchor, BrushOptions, HandleSide, PathDraft, PenSession, Sample,
 };
+use vectra_geometry::paths::{build_path, ResolvedSegment};
+use vectra_operations::{
+    clip_polyline, clipped_path, content_region, enclosed_area, ClipState, FLATTEN_TOLERANCE,
+};
 
 use wasm_bindgen::prelude::*;
 
@@ -777,12 +781,77 @@ impl VectraEngine {
         reply.to_json()
     }
 
+    /// **Alpha Lock** (Task 10.7 RULE 3a): constrain a draft to the active layer's
+    /// existing content, or pass it through untouched.
+    ///
+    /// * No alpha-locked active layer → the draft is returned unchanged (the
+    ///   common case walks no geometry at all).
+    /// * Alpha-locked and nothing survives → `Err`, with the reason in the reply:
+    ///   the designer turned the lock on and drew where the layer has nothing,
+    ///   which is exactly the case Procreate also drops.
+    /// * Otherwise → the clipped draft, whose geometry is a *subset* of the
+    ///   layer's content by construction.
+    ///
+    /// # Two clips, because there are two kinds of drawing
+    ///
+    /// A **filled** draft (a brush ribbon, a quick shape, a closed pen path) is a
+    /// region, so it is clipped by the boolean: `region(draft) ∩ content`, the
+    /// exact set the rule asks for. An **open** pen path is a curve with no area
+    /// at all — intersecting it with anything yields nothing — so it is clipped
+    /// as a *polyline*: the stretches of the curve inside the layer's artwork are
+    /// kept, the rest is dropped. Which one runs is decided by the draft's own
+    /// area, not by the tool's name, so a closed pen path gets the boolean and an
+    /// open one gets the 1-D clip without either tool being special-cased.
+    fn alpha_lock(&self, draft: &PathDraft) -> Result<PathDraft, String> {
+        let Some(layer) = ClipState::locked_layer(self.core.document()) else {
+            return Ok(draft.clone());
+        };
+        let layer_children = layer.children.clone();
+        let layer_name = layer.name.clone();
+        let content = content_region(self.scene.scene(), &layer_children);
+        let path = draft_path(draft);
+        if enclosed_area(&path) > f64::from(FLATTEN_TOLERANCE) {
+            let Some(clipped) = clipped_path(&path, &content) else {
+                return Err(format!(
+                    "alpha lock: \"{layer_name}\" has no artwork here for the new stroke to land on"
+                ));
+            };
+            return draft_from_path(&clipped).ok_or_else(|| {
+                format!("alpha lock: the clipped stroke on \"{layer_name}\" came out empty")
+            });
+        }
+        // The 1-D clip. The longest surviving run is the stroke the designer
+        // gets; a line drawn across the boundary of the artwork keeps the part
+        // that was *on* the artwork, which is the whole promise of alpha lock.
+        let samples = draft_samples(draft);
+        let runs = clip_polyline(&samples, &content);
+        let longest = runs.iter().max_by_key(|run| run.len());
+        match longest {
+            Some(run) if run.len() >= 2 => Ok(draft_from_points(run)),
+            _ => Err(format!(
+                "alpha lock: \"{layer_name}\" has no artwork here for the new stroke to land on"
+            )),
+        }
+    }
+
     /// The shared commit path: dispatch the commands a draft implies, then answer
     /// with the engine's response plus the node's id.
+    ///
+    /// **Task 10.7 RULE 3a lives here.** New artwork is the only thing alpha lock
+    /// constrains, and this is where new artwork becomes geometry: if the *active*
+    /// layer is alpha-locked, the draft is intersected with the layer's existing
+    /// content first, and the command path is handed the clipped draft. A stroke
+    /// that lies entirely outside the alpha is refused with a sentence a designer
+    /// can read — the alternative, storing an empty path, would look like a bug.
     fn commit_draft(&mut self, draft: &PathDraft, name: &str) -> String {
         if draft.segments.is_empty() {
             return DrawReply::err("nothing to commit: the path has no segments").to_json();
         }
+        let draft = match self.alpha_lock(draft) {
+            Ok(clipped) => clipped,
+            Err(message) => return DrawReply::err(message).to_json(),
+        };
+        let draft = &draft;
         let node_id = new_node_id();
         let mut response = String::new();
         for command in path_commands(node_id, name, draft, false) {
@@ -1535,4 +1604,177 @@ fn edit_batch(
         }
     }
     Ok(Command::batch_commands(commands))
+}
+
+/// A draft's segments in the geometry crate's vocabulary — the same resolution
+/// the evaluator performs, one step earlier: before the node exists.
+fn draft_segments(draft: &PathDraft) -> Vec<ResolvedSegment> {
+    draft
+        .segments
+        .iter()
+        .map(|segment| match segment {
+            PathSegment::Line { to } => ResolvedSegment::Line { to: point_of(to) },
+            PathSegment::Quadratic { control, to } => ResolvedSegment::Quadratic {
+                control: point_of(control),
+                to: point_of(to),
+            },
+            PathSegment::Cubic {
+                control1,
+                control2,
+                to,
+            } => ResolvedSegment::Cubic {
+                control1: point_of(control1),
+                control2: point_of(control2),
+                to: point_of(to),
+            },
+            PathSegment::Close => ResolvedSegment::Close,
+        })
+        .collect()
+}
+
+/// A draft as a lyon path — what the clip reads.
+pub(crate) fn draft_path(draft: &PathDraft) -> lyon::path::Path {
+    build_path(draft.start, &draft_segments(draft))
+}
+
+/// **The points a draft passes through**, flattened — the 1-D form of a draft,
+/// which is what a curve with no area can be clipped as.
+///
+/// Curves are subdivided (24 steps) rather than flattened at
+/// `FLATTEN_TOLERANCE`: the clip tests each point against the layer's artwork,
+/// and a straight chord between the surviving points would cut a corner the hand
+/// did not cut. 24 steps puts the error far below one screen pixel at any
+/// plausible zoom.
+pub(crate) fn draft_samples(draft: &PathDraft) -> Vec<(f64, f64)> {
+    const STEPS: usize = 24;
+    /// The longest gap between two straight-run samples, in document units.
+    ///
+    /// A **straight** segment needs sampling too. The 1-D clip tests *points*,
+    /// so two anchors a hundred units apart would step clean over a piece of
+    /// artwork sitting between them: the designer draws a line across the layer
+    /// and is told there is nothing to land on, which is not what alpha lock
+    /// means. Four units is about a fingertip at 1× zoom; the step cap bounds
+    /// the cost of a very long line so one absurd segment cannot make the clip
+    /// quadratic.
+    const MAX_GAP: f64 = 4.0;
+    const MAX_STEPS: usize = 256;
+    let mut points = vec![(draft.start.x, draft.start.y)];
+    let mut cursor = draft.start;
+    for segment in &draft.segments {
+        match segment {
+            PathSegment::Line { to } => {
+                let to = point_of(to);
+                let length = ((to.x - cursor.x).powi(2) + (to.y - cursor.y).powi(2)).sqrt();
+                let steps = ((length / MAX_GAP).ceil() as usize).clamp(1, MAX_STEPS);
+                for step in 1..=steps {
+                    let t = step as f64 / steps as f64;
+                    points.push((
+                        cursor.x + (to.x - cursor.x) * t,
+                        cursor.y + (to.y - cursor.y) * t,
+                    ));
+                }
+                cursor = to;
+            }
+            PathSegment::Quadratic { control, to } => {
+                let (control, to) = (point_of(control), point_of(to));
+                for step in 1..=STEPS {
+                    let t = step as f64 / STEPS as f64;
+                    let u = 1.0 - t;
+                    points.push((
+                        u * u * cursor.x + 2.0 * u * t * control.x + t * t * to.x,
+                        u * u * cursor.y + 2.0 * u * t * control.y + t * t * to.y,
+                    ));
+                }
+                cursor = to;
+            }
+            PathSegment::Cubic {
+                control1,
+                control2,
+                to,
+            } => {
+                let (control1, control2, to) =
+                    (point_of(control1), point_of(control2), point_of(to));
+                for step in 1..=STEPS {
+                    let t = step as f64 / STEPS as f64;
+                    let u = 1.0 - t;
+                    points.push((
+                        u * u * u * cursor.x
+                            + 3.0 * u * u * t * control1.x
+                            + 3.0 * u * t * t * control2.x
+                            + t * t * t * to.x,
+                        u * u * u * cursor.y
+                            + 3.0 * u * u * t * control1.y
+                            + 3.0 * u * t * t * control2.y
+                            + t * t * t * to.y,
+                    ));
+                }
+                cursor = to;
+            }
+            // A `Close` ends the chain; the clip is of the *open* path, and a
+            // closing line would be an edge the hand did not draw.
+            PathSegment::Close => {}
+        }
+    }
+    points
+}
+
+/// A clipped run of points back as a draft of straight segments (the run is a
+/// polyline; the curves it came from are already flattened).
+pub(crate) fn draft_from_points(points: &[(f64, f64)]) -> PathDraft {
+    let start = Point2::new(points[0].0, points[0].1);
+    let segments = points[1..]
+        .iter()
+        .map(|(x, y)| PathSegment::Line {
+            to: Parameter::Literal(Point2::new(*x, *y)),
+        })
+        .collect();
+    PathDraft {
+        start,
+        segments,
+        closed: false,
+    }
+}
+
+/// A lyon path back as a draft, or `None` when it has no chain to give.
+///
+/// Every curve becomes the polyline the clip produced (the intersection is
+/// polygonal — `FLATTEN_TOLERANCE` was already applied), which is why the
+/// conversion is a faithful round trip of *the clipped region* rather than an
+/// approximation of the original curve.
+pub(crate) fn draft_from_path(path: &lyon::path::Path) -> Option<PathDraft> {
+    let mut start: Option<Point2> = None;
+    let mut segments: Vec<PathSegment> = Vec::new();
+    for event in path.iter() {
+        match event {
+            lyon::path::PathEvent::Begin { at } => {
+                start = Some(Point2::new(at.x as f64, at.y as f64));
+            }
+            lyon::path::PathEvent::Line { to, .. } => segments.push(PathSegment::Line {
+                to: Parameter::Literal(Point2::new(to.x as f64, to.y as f64)),
+            }),
+            lyon::path::PathEvent::Quadratic { ctrl, to, .. } => {
+                segments.push(PathSegment::Quadratic {
+                    control: Parameter::Literal(Point2::new(ctrl.x as f64, ctrl.y as f64)),
+                    to: Parameter::Literal(Point2::new(to.x as f64, to.y as f64)),
+                })
+            }
+            lyon::path::PathEvent::Cubic {
+                ctrl1, ctrl2, to, ..
+            } => segments.push(PathSegment::Cubic {
+                control1: Parameter::Literal(Point2::new(ctrl1.x as f64, ctrl1.y as f64)),
+                control2: Parameter::Literal(Point2::new(ctrl2.x as f64, ctrl2.y as f64)),
+                to: Parameter::Literal(Point2::new(to.x as f64, to.y as f64)),
+            }),
+            lyon::path::PathEvent::End { .. } => {}
+        }
+    }
+    let start = start?;
+    if segments.is_empty() {
+        return None;
+    }
+    Some(PathDraft {
+        start,
+        segments,
+        closed: true,
+    })
 }

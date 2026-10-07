@@ -1,0 +1,25 @@
+[package]
+name = "wbgen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Offline stand-in for the `wasm-bindgen` CLI (builds the CLI's own library)"
+
+# This is the `wasm-bindgen` CLI without the CLI. The application's wasm build
+# wants exactly one of the CLI's subcommands — `wasm-bindgen --target web
+# --out-dir …` — and that subcommand is a thin argument-parsing layer over
+# `wasm-bindgen-cli-support`, which is an ordinary library crate. When the CLI
+# binary cannot be obtained (its release assets live on a host this environment
+# firewalls, and crates.io is unreachable) but its *sources* can, this driver
+# reproduces the flags that matter and calls the library.
+#
+# It is not a general replacement: it has no `--target nodejs`, no
+# `wasm2es6js`, no test runner. It exists to regenerate this app's glue.
+# Standalone on purpose: this lives inside the app's directory but is *not* one
+# of the workspace's crates — it is a build tool, pinned to a different source
+# tree (the CLI's own closure), and cargo must not resolve it against
+# `Vectra/Cargo.lock`.
+[workspace]
+
+[dependencies]
+wasm-bindgen-cli-support = "=0.2.129"

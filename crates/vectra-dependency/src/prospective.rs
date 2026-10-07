@@ -212,6 +212,82 @@ pub fn prospective_edges(
                 adds: edges_from_node(&simulated),
             }
         }
+        // ── Task 10.6: Smart Components ────────────────────────────────────
+        //
+        // Creating a component *rebinds* its members' slots: a literal width
+        // becomes `$c<slug>_size`, a literal fill becomes a procedural port. So
+        // the dry run has to simulate the same plan the command will run — the
+        // binding is planned against a clone of each member, and the member's
+        // outgoing edges are re-derived from it. (No *new* kind of edge can
+        // appear: a binding reads a variable or an expression over variables,
+        // never a port, so a component cannot close a cycle — but a member that
+        // stops reading a procedural port loses that edge, which is exactly what
+        // `removes` is for.)
+        Command::CreateComponent {
+            id, members, props, ..
+        } => {
+            if members.is_empty() {
+                return ProspectiveEdges::empty();
+            }
+            let props: Vec<vectra_core::ComponentProp> = if props.is_empty() {
+                vectra_core::component::infer_props(doc, members)
+            } else {
+                props.clone()
+            };
+            let plan = vectra_core::component::bind_plan(
+                doc,
+                *id,
+                members,
+                &vectra_core::component::command_prefix(*id),
+                &props,
+                None,
+            );
+            let mut removes: Vec<DagEdge> = Vec::new();
+            let mut adds: Vec<DagEdge> = Vec::new();
+            for (index, member) in members.iter().enumerate() {
+                let Ok(node) = doc.get_node(*member) else {
+                    return ProspectiveEdges::empty();
+                };
+                removes.extend(graph.property_edges(*member));
+                let mut simulated = node.clone();
+                let mut ok = true;
+                for write in plan.writes.iter().filter(|write| write.member == index) {
+                    if simulated
+                        .set_param(&write.property, write.value.clone())
+                        .is_err()
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    return ProspectiveEdges::empty();
+                }
+                adds.extend(edges_from_node(&simulated));
+            }
+            ProspectiveEdges { removes, adds }
+        }
+        // Placing an instance writes *new* nodes (clones in a group) and binds
+        // their slots to fresh variables: nothing in the existing graph moves.
+        Command::InstantiateComponent { .. } => ProspectiveEdges::empty(),
+        // A prop write touches a variable or the component's own operands — never
+        // a node's parameters — and a spec edit touches no slot of any node.
+        Command::SetComponentProp { .. } | Command::SetComponentSpec { .. } => {
+            ProspectiveEdges::empty()
+        }
+        // A duplicate carries the source's parameters across unchanged, so its
+        // edges are the source's edges.
+        Command::DuplicateNode { id, source, .. } => {
+            let Ok(node) = doc.get_node(*source) else {
+                return ProspectiveEdges::empty();
+            };
+            let mut copy = node.clone();
+            copy.id = *id;
+            ProspectiveEdges {
+                removes: Vec::new(),
+                adds: edges_from_node(&copy),
+            }
+        }
         // Presentation flags, layer membership, layer order and artboard
         // bookkeeping carry no parametric values at all: there is nothing to
         // simulate and nothing to gate (RULE 4).
@@ -223,6 +299,10 @@ pub fn prospective_edges(
         | Command::RenameLayer { .. }
         | Command::SetLayerVisible { .. }
         | Command::SetLayerLocked { .. }
+        // Task 10.7 RULE 3's two flags: booleans on a layer record, and — like
+        // the eye and the padlock — nothing a parametric value can flow from.
+        | Command::SetLayerAlphaLocked { .. }
+        | Command::SetLayerClippingMask { .. }
         | Command::ReorderLayer { .. }
         | Command::AssignNodeToLayer { .. }
         | Command::DetachNodeFromLayers { .. }

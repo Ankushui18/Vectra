@@ -18,6 +18,18 @@
   box-sizing: border-box;
 }
 
+/* **Task 10.7 RULE 1, the document's half.**
+   A two-finger drag on a touchscreen is the *browser's* scroll gesture, and it
+   is decided at the viewport — before any `pointermove` reaches the canvas. The
+   canvas's own `touch-action: none` stops it there; this stops the page from
+   rubber-banding beneath it, so a gesture that overshoots the canvas edge cannot
+   scroll the workspace either. Nothing else on the page loses a scrollbar it
+   needs: the panes scroll normally. */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -1910,4 +1922,237 @@ button.tool kbd {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* ── Task 10.6: Make Magic (⌘K) and Smart Components ───────────────────── */
+
+.magic-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 12, 20, 0.62);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  z-index: 50;
+}
+
+.magic-bar {
+  width: min(680px, 92vw);
+  background: #131a26;
+  border: 1px solid #2b3a52;
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  padding: 14px 16px 12px;
+}
+
+.magic-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.magic-spark {
+  font-size: 18px;
+}
+
+.magic-input {
+  flex: 1;
+  background: #0d131d;
+  border: 1px solid #2b3a52;
+  border-radius: 8px;
+  color: #e8eef8;
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 11px;
+}
+
+.magic-input:focus {
+  outline: none;
+  border-color: #4a86d8;
+}
+
+.magic-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.magic-chip {
+  background: #1b2536;
+  border: 1px solid #2b3a52;
+  border-radius: 999px;
+  color: #cfe0f5;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 11px;
+}
+
+.magic-chip:hover {
+  border-color: #4a86d8;
+  color: #ffffff;
+}
+
+.magic-hint,
+.magic-foot {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: #8ea3bd;
+}
+
+.magic-prose {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: #cde3c0;
+  background: #17231a;
+  border: 1px solid #2c4630;
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+
+/* The Smart Component inspector: sliders, never a graph. */
+.prop-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.prop-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.prop-label {
+  flex: 0 0 96px;
+  font-size: 12px;
+  color: #cfe0f5;
+}
+
+.prop-derived {
+  color: #8ea3bd;
+  font-size: 10px;
+}
+
+.prop-list input[type='range'] {
+  flex: 1;
+  accent-color: #4a86d8;
+}
+
+.prop-list input[type='color'] {
+  width: 44px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #2b3a52;
+  border-radius: 4px;
+  background: none;
+}
+
+.prop-value {
+  flex: 0 0 44px;
+  text-align: right;
+  font-size: 11px;
+  color: #9fd0ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.icon-sizes {
+  flex: 1;
+  background: #0d131d;
+  border: 1px solid #2b3a52;
+  border-radius: 6px;
+  color: #e8eef8;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+/* ── Task 10.7: the pen/brush settings, the StreamLine slider, the well ──── */
+
+.draw-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.streamline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.streamline-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.streamline input[type='range'] {
+  width: 100%;
+}
+
+.streamline-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #8fa3bb;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* The well is the drag source: a swatch with a grip, and a plain colour input
+   beside it. Dragging *is* the gesture (RULE 4) — pressing the input opens the
+   operating system's picker, as it should. */
+.colordrop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.well {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  cursor: grab;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11px;
+  letter-spacing: -2px;
+  touch-action: none;
+}
+
+.well.held {
+  cursor: grabbing;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+
+.colordrop-hint {
+  flex: 1 0 100%;
+  font-size: 10px;
+  color: #8fa3bb;
+}
+
+/* The chip that follows the pointer while a colour is in flight. Fixed, so it
+   is never clipped by the column it started in, and never intercepts the drop
+   it is about to make. */
+.colordrop-ghost {
+  position: fixed;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 40;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
 }

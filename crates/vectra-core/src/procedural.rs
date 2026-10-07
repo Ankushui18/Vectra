@@ -278,6 +278,30 @@ pub enum ProceduralKind {
         iterations: Parameter<f64>,
         strength: Parameter<f64>,
     },
+    /// **A Smart Component master** (Task 10.6 RULE 1): the definition of a
+    /// parametric piece of artwork.
+    ///
+    /// It produces no geometry of its own — its `members` are ordinary authored
+    /// nodes, and its job is to declare the [`crate::component::ComponentSpec`]
+    /// those members are bound to. Publishing each prop as a value port is what
+    /// lets a reader (an instance, an operation, a `Parameter::Procedural`
+    /// slot) follow the master's value through the graph.
+    ComponentMaster {
+        /// The authored nodes this definition is made of.
+        members: Vec<NodeId>,
+        spec: crate::component::ComponentSpec,
+    },
+    /// **A Smart Component instance** (Task 10.6 RULE 1): a reference to a
+    /// master, plus its own copy of the artwork.
+    ///
+    /// `group` is the authored group holding the clones; `spec` names the props
+    /// and the variables they read. Like the master, an instance produces no
+    /// geometry of its own — the clones are real nodes and draw themselves.
+    Component {
+        master: NodeId,
+        group: NodeId,
+        spec: crate::component::ComponentSpec,
+    },
 }
 
 impl ProceduralKind {
@@ -288,6 +312,8 @@ impl ProceduralKind {
             Self::Repeat { .. } => "repeat",
             Self::Noise { .. } => "noise",
             Self::Smooth { .. } => "smooth",
+            Self::ComponentMaster { .. } => "component_master",
+            Self::Component { .. } => "component",
         }
     }
 
@@ -298,6 +324,10 @@ impl ProceduralKind {
             Self::Repeat { .. } | Self::Noise { .. } | Self::Smooth { .. } => {
                 vec![Port::new("region", PortType::Region)]
             }
+            // A component reads its artwork from the document (its members are
+            // named by id), not from a wire: there is nothing to connect and
+            // nothing to type-check at this boundary.
+            Self::ComponentMaster { .. } | Self::Component { .. } => Vec::new(),
         }
     }
 
@@ -319,6 +349,13 @@ impl ProceduralKind {
                 Port::new("tint", PortType::Color),
             ],
             Self::Smooth { .. } => vec![Port::new("region", PortType::Region)],
+            // One value port per prop, in prop order: a component's props are
+            // readable from anywhere that can name a port.
+            Self::ComponentMaster { spec, .. } | Self::Component { spec, .. } => spec
+                .props
+                .iter()
+                .map(|prop| Port::new(prop.key.clone(), prop.ty.port_type()))
+                .collect(),
         }
     }
 
@@ -346,6 +383,13 @@ impl ProceduralKind {
                 Port::new("iterations", PortType::Scalar),
                 Port::new("strength", PortType::Scalar),
             ],
+            // A prop *is* an operand port here: `SetComponentProp` writes the
+            // variable or the colour it names, and the pass republishes it.
+            Self::ComponentMaster { spec, .. } | Self::Component { spec, .. } => spec
+                .props
+                .iter()
+                .map(|prop| Port::new(prop.key.clone(), prop.ty.port_type()))
+                .collect(),
         }
     }
 
@@ -386,13 +430,26 @@ impl ProceduralKind {
                 map.insert("iterations".into(), ParamValue::Float(iterations.clone()));
                 map.insert("strength".into(), ParamValue::Float(strength.clone()));
             }
+            // A component's operands are seeded by the command that creates it
+            // (its variables exist by then), so a bare `ProceduralNode::new` of
+            // this kind carries none — and `operand()` reports `None` until the
+            // command fills them in, rather than inventing a value.
+            Self::ComponentMaster { .. } | Self::Component { .. } => {}
         }
         map
     }
 
     /// The port that composes into the scene, if this kind produces geometry.
+    /// The port that composes into the scene, if this kind produces geometry.
+    ///
+    /// A component produces none: its members (or clones) are ordinary authored
+    /// nodes and draw themselves, which is what keeps instances inside every
+    /// existing path — layers, hit testing, export, the scene.
     pub fn geometry_port(&self) -> Option<PortId> {
-        Some("region".to_string())
+        match self {
+            Self::ComponentMaster { .. } | Self::Component { .. } => None,
+            _ => Some("region".to_string()),
+        }
     }
 
     /// The port type of `port`, if the kind declares it as an output.
@@ -489,6 +546,24 @@ impl ProceduralKind {
                 "smooth {} {}",
                 operand("n", iterations),
                 operand("s", strength)
+            ),
+            Self::ComponentMaster { members, spec } => format!(
+                "component master — {} member(s), props[{}]",
+                members.len(),
+                spec.props
+                    .iter()
+                    .map(|prop| prop.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Component { master, spec, .. } => format!(
+                "instance of {} — props[{}]",
+                short(master),
+                spec.props
+                    .iter()
+                    .map(|prop| prop.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }

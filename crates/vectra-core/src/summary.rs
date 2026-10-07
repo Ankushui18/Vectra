@@ -85,6 +85,26 @@ pub struct DocumentSummary {
     pub procedural: Vec<SummaryProcedural>,
     /// Motion tracks, sorted by name.
     pub tracks: Vec<SummaryTrack>,
+    /// The nodes the designer has **selected**, ids in draw order (Task 10.6
+    /// RULE 2). This is what "this" means in a Make Magic prompt: the AI reasons
+    /// about the selection, not about the whole document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selection: Vec<String>,
+    /// The artboard the work is happening on, if any — the frame's size is the
+    /// context for "make this icon-scale" and for the Icon Studio macro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artboard: Option<SummaryArtboard>,
+}
+
+/// The active artboard, as the summary reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SummaryArtboard {
+    pub id: String,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// One node: identity, name, kind, and every addressable slot.
@@ -210,6 +230,89 @@ impl DocumentSummary {
         Self::capture_in(doc, &doc.evaluation_context(0.0))
     }
 
+    /// Capture a document **with a selection**: the form the Make Magic command
+    /// bar sends, so "make this geometric" has a "this" (Task 10.6 RULE 2).
+    pub fn capture_selection(doc: &Document, selection: &[NodeId]) -> Self {
+        Self::capture_selection_in(doc, &doc.evaluation_context(0.0), selection)
+    }
+
+    /// [`capture_selection`], against a live context.
+    pub fn capture_selection_in(
+        doc: &Document,
+        ctx: &EvaluationContext<'_>,
+        selection: &[NodeId],
+    ) -> Self {
+        let mut summary = Self::capture_in(doc, ctx);
+        summary.with_selection(doc, selection);
+        summary
+    }
+
+    /// Fill in the selection and the active artboard.
+    ///
+    /// Ids that no longer exist are dropped and the survivors are put in **draw
+    /// order**: the planner reads "the first" and "the last" of a selection, and
+    /// that has to mean the same thing to it as it does on canvas.
+    pub fn with_selection(&mut self, doc: &Document, selection: &[NodeId]) -> &mut Self {
+        let wanted: BTreeSet<NodeId> = selection.iter().copied().collect();
+        self.selection = doc
+            .order
+            .iter()
+            .filter(|id| wanted.contains(id))
+            .map(ToString::to_string)
+            .collect();
+        // `active_id`, not the raw flag: the registry's rule is "the flagged
+        // board, else the first one", and a document whose artboard was created
+        // by a command has a first board before it ever has a flag.
+        self.artboard = doc.artboards.active_id().and_then(|id| {
+            doc.artboards.get(&id).map(|board| SummaryArtboard {
+                id: board.id.to_string(),
+                name: board.name.clone(),
+                x: board.x,
+                y: board.y,
+                width: board.width,
+                height: board.height,
+            })
+        });
+        self
+    }
+
+    /// The selected nodes, in draw order.
+    pub fn selected(&self) -> Vec<&SummaryNode> {
+        self.selection
+            .iter()
+            .filter_map(|id| self.nodes.iter().find(|node| &node.id == id))
+            .collect()
+    }
+
+    /// The selection, as one clean line for a designer — never JSON (RULE 4).
+    pub fn selection_prose(&self) -> String {
+        let selected = self.selected();
+        if selected.is_empty() {
+            return "Nothing selected".to_string();
+        }
+        let names: Vec<&str> = selected
+            .iter()
+            .map(|node| node.name.as_str())
+            .filter(|name| !name.is_empty())
+            .take(4)
+            .collect();
+        let listed = if names.is_empty() {
+            format!("{} shape(s)", selected.len())
+        } else if names.len() == selected.len() {
+            names.join(", ")
+        } else {
+            format!(
+                "{} and {} more",
+                names.join(", "),
+                selected.len() - names.len()
+            )
+        };
+        match &self.artboard {
+            Some(board) => format!("{listed} on \u{201c}{}\u{201d}", board.name),
+            None => listed,
+        }
+    }
+
     /// Capture a document against a live context — the form the engine uses, so
     /// that a spring exports the number it is drawing and a procedural read its
     /// published value.
@@ -280,6 +383,22 @@ impl DocumentSummary {
             .collect();
         tracks.sort_by(|a, b| a.name.cmp(&b.name));
 
+        // The active artboard is part of the *context* every prompt is grounded
+        // in (Task 10.6 RULE 2): "make this icon-scale" is meaningless without
+        // knowing what frame the work sits on. The selection is not — it is
+        // what the caller is looking at, so it arrives through
+        // [`DocumentSummary::with_selection`].
+        let artboard = doc.artboards.active_id().and_then(|id| {
+            doc.artboards.get(&id).map(|board| SummaryArtboard {
+                id: board.id.to_string(),
+                name: board.name.clone(),
+                x: board.x,
+                y: board.y,
+                width: board.width,
+                height: board.height,
+            })
+        });
+
         Self {
             version: doc.version,
             nodes,
@@ -289,6 +408,8 @@ impl DocumentSummary {
             constraints,
             procedural,
             tracks,
+            selection: Vec::new(),
+            artboard,
         }
     }
 
@@ -484,6 +605,34 @@ impl DocumentSummary {
             self.procedural.len(),
             self.tracks.len(),
         );
+
+        if let Some(board) = &self.artboard {
+            let _ = writeln!(
+                out,
+                "ARTBOARD \u{201c}{}\u{201d} {}x{} at {},{} (id={})",
+                board.name,
+                trim_number(board.width),
+                trim_number(board.height),
+                trim_number(board.x),
+                trim_number(board.y),
+                board.id
+            );
+        }
+        if self.selection.is_empty() {
+            let _ = writeln!(
+                out,
+                "SELECTION: none (\"this\" refers to the whole document)"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "SELECTION ({} node(s), draw order back \u{2192} front) \u{2014} \"this\" means these:",
+                self.selection.len()
+            );
+            for node in self.selected() {
+                let _ = writeln!(out, "  {}  id={}", node.label, node.id);
+            }
+        }
 
         if !self.variables.is_empty() {
             let _ = writeln!(out, "VARIABLES");

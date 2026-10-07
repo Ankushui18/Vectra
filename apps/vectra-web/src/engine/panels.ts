@@ -68,6 +68,14 @@ export interface LayerRow {
   /** The node's *own* flags, when they differ from the effective ones. */
   ownVisible?: boolean;
   ownLocked?: boolean;
+  /** **Task 10.7 RULE 3a**: the layer's alpha lock (layers only, `false` for
+   *  nodes — alpha lock is a property of a layer, not of a shape). */
+  alphaLocked?: boolean;
+  /** **Task 10.7 RULE 3b**: the layer clips to the one below it. */
+  clippingMask?: boolean;
+  /** The layer below, when there is one: the mask a clipping layer would use.
+   *  `null` = nothing below, so the toggle is disabled. */
+  clippedTo?: string | null;
 }
 
 /**
@@ -101,6 +109,9 @@ export function layerRows(
       isGroup: false,
       canOpen: layer.children.length > 0,
       layerId: layer.id,
+      alphaLocked: layer.alpha_locked,
+      clippingMask: layer.clipping_mask,
+      clippedTo: layer.clipped_to,
     });
     if (!expanded.has(layer.id)) continue;
     rows.push(...layerTreeRows(layer, expanded, nodes));

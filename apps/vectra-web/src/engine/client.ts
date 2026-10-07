@@ -16,6 +16,7 @@ import init, { Renderer, VectraEngine } from '../wasm/vectra_wasm.js';
 import wasmUrl from '../wasm/vectra_wasm_bg.wasm?url';
 import type {
   AiCallWire,
+  ComponentReplyWire,
   DocToClientWire,
   DrawHitWire,
   DrawOverlayWire,
@@ -30,10 +31,53 @@ import type {
   FrameWire,
   MotionTrackWire,
   MotionWire,
+  ComponentViewWire,
   ProceduralKindOptionWire,
   ProceduralReportWire,
+  SelectionWire,
   SnapshotWire,
+  StructuralMacroWire,
 } from './wire';
+
+/**
+ * The engine surface **Task 10.6** added, typed here rather than in the generated
+ * `vectra_wasm.d.ts`.
+ *
+ * `vectra_wasm.*` is produced by `apps/vectra-web/scripts/build-wasm.sh`, which
+ * needs the `wasm-bindgen` CLI. A checkout whose wasm predates its Rust — or one
+ * built where that CLI is unavailable — would otherwise fail to typecheck
+ * against methods the binary does not export yet. Every member is optional and
+ * probed at runtime, so the UI can *say* the engine is older than the frontend
+ * instead of throwing on the first click (RULE 4: a sentence, not a stack trace).
+ */
+type MakeMagicEngine = {
+  set_selection?: (ids_json: string) => string;
+  component_view?: () => string;
+  create_component?: (members_json: string, name?: string) => string;
+  instantiate_component?: (master: string, name?: string) => string;
+  set_component_prop?: (target: string, prop: string, value_json: string) => string;
+  icon_set?: (master: string, sizes_json: string) => string;
+  structural_macros?: () => string;
+};
+
+/**
+ * Is the engine binary older than the frontend?
+ *
+ * True when it does not export the Task 10.6 surface — a checkout whose wasm has
+ * not been rebuilt since the Rust changed. The UI says so in one sentence and
+ * leaves the *rest* of the studio working, which is the honest failure: a missing
+ * method is a stale build, not a broken document.
+ *
+ * Pure, and exported, because it is the whole degradation contract: it is tested
+ * against `{}` (every method missing) and against a stub that has one.
+ */
+export function engineIsOlderThanUi(engine: MakeMagicEngine): boolean {
+  return (
+    typeof engine.set_selection !== 'function' ||
+    typeof engine.component_view !== 'function' ||
+    typeof engine.structural_macros !== 'function'
+  );
+}
 
 /** What a client-side point maps to: document coordinates, or nothing. */
 export interface DocPoint {
@@ -364,6 +408,119 @@ export class VectraClient {
    */
   aiExecuteWithRetry(prompt: string, summaryJson = ''): AiExecuteWire {
     return JSON.parse(this.engine.ai_execute_with_retry(prompt, summaryJson)) as AiExecuteWire;
+  }
+
+  // ── Task 10.6: Smart Components + Make Magic ──────────────────────────────
+
+  /** The Task 10.6 surface, probed. `undefined` when the wasm predates it. */
+  private get magic(): MakeMagicEngine {
+    return this.engine as unknown as MakeMagicEngine;
+  }
+
+  /** See [`engineIsOlderThanUi`] — the probe, on this client's engine. */
+  get engineIsOlder(): boolean {
+    return engineIsOlderThanUi(this.magic);
+  }
+
+  /** The one-sentence explanation, with the command that closes the gap. */
+  static readonly STALE_ENGINE =
+    'This engine build is older than the interface: Smart Components and Make Magic ' +
+    'need a rebuild (bash apps/vectra-web/scripts/build-wasm.sh).';
+
+  /** A stale-engine reply in the shape every caller already understands. */
+  private stale(): ComponentReplyWire {
+    return { status: 'error', message: VectraClient.STALE_ENGINE };
+  }
+
+  /**
+   * Tell the engine what is selected, so a prompt can mean "this".
+   *
+   * State, not a command: it is not undoable and never touches the document.
+   * The reply is the engine's own prose for the selection, so the command bar
+   * can say *what* it will act on without the UI composing a sentence.
+   */
+  setSelection(ids: string[]): SelectionWire | null {
+    try {
+      const reply = this.magic.set_selection?.(JSON.stringify(ids));
+      return reply ? (JSON.parse(reply) as SelectionWire) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The Smart Component inspector: role, props, headline. */
+  componentView(): ComponentViewWire | null {
+    try {
+      const reply = this.magic.component_view?.();
+      return reply ? (JSON.parse(reply) as ComponentViewWire) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Create Component: the selection becomes a master with props. */
+  createComponent(members: string[], name?: string): ComponentReplyWire {
+    if (typeof this.magic.create_component !== 'function') return this.stale();
+    try {
+      return JSON.parse(
+        this.magic.create_component(JSON.stringify(members), name ?? undefined),
+      ) as ComponentReplyWire;
+    } catch (error) {
+      return { status: 'error', message: String(error) };
+    }
+  }
+
+  /** Place an instance of a component. */
+  instantiateComponent(master: string, name?: string): ComponentReplyWire {
+    if (typeof this.magic.instantiate_component !== 'function') return this.stale();
+    try {
+      return JSON.parse(
+        this.magic.instantiate_component(master, name ?? undefined),
+      ) as ComponentReplyWire;
+    } catch (error) {
+      return { status: 'error', message: String(error) };
+    }
+  }
+
+  /**
+   * Set one prop on one instance. `value` is a typed `ParamValue`, which is
+   * exactly what `ComponentPropWire.ty` says per prop.
+   */
+  setComponentProp(
+    target: string,
+    prop: string,
+    value: { Float: { Literal: number } } | { Color: { Literal: string } },
+  ): ComponentReplyWire {
+    if (typeof this.magic.set_component_prop !== 'function') return this.stale();
+    try {
+      return JSON.parse(
+        this.magic.set_component_prop(target, prop, JSON.stringify(value)),
+      ) as ComponentReplyWire;
+    } catch (error) {
+      return { status: 'error', message: String(error) };
+    }
+  }
+
+  /** Generate Icon Set (RULE 3): one instance per size, each on its artboard. */
+  iconSet(master: string, sizes: number[]): ComponentReplyWire {
+    if (typeof this.magic.icon_set !== 'function') return this.stale();
+    try {
+      return JSON.parse(
+        this.magic.icon_set(master, JSON.stringify(sizes)),
+      ) as ComponentReplyWire;
+    } catch (error) {
+      return { status: 'error', message: String(error) };
+    }
+  }
+
+  /** The structural macros the command bar offers as chips. */
+  structuralMacros(): StructuralMacroWire[] {
+    try {
+      const reply = this.magic.structural_macros?.();
+      return reply ? (JSON.parse(reply) as StructuralMacroWire[]) : [];
+    } catch {
+      return [];
+    }
   }
 
   /** Register or replace a keyframe track (undoable). */

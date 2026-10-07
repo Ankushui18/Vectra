@@ -298,6 +298,17 @@ pub struct SnapshotLayer {
     pub name: String,
     pub visible: bool,
     pub locked: bool,
+    /// **Task 10.7 RULE 3a**: new artwork on this layer is constrained to what
+    /// the layer already holds. The panel shows a chip; the engine reads the flag
+    /// at the drawing boundary.
+    pub alpha_locked: bool,
+    /// **Task 10.7 RULE 3b**: this layer shows only where it overlaps the layer
+    /// below.
+    pub clipping_mask: bool,
+    /// The layer this one clips to, when a layer exists below it. `None` for the
+    /// bottom layer — nothing to clip to, so the panel disables the toggle rather
+    /// than letting the designer switch on a mask that masks everything away.
+    pub clipped_to: Option<String>,
     /// The layer's contents, back → front, exactly as the engine draws them.
     pub children: Vec<String>,
     /// Display names parallel to `children` — the panel formats no ids.
@@ -713,6 +724,12 @@ pub fn build_snapshot(inputs: SnapshotInputs<'_>) -> SnapshotResponse {
             name: layer.name.clone(),
             visible: layer.visible,
             locked: layer.locked,
+            alpha_locked: layer.alpha_locked,
+            clipping_mask: layer.clipping_mask,
+            clipped_to: doc
+                .layers
+                .below(&layer.id)
+                .map(|below| below.id.to_string()),
             children: layer.children.iter().map(ToString::to_string).collect(),
             child_names: layer.children.iter().map(node_name).collect(),
             child_is_group: layer.children.iter().map(is_group).collect(),

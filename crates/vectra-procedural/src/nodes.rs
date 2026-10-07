@@ -41,7 +41,41 @@ pub fn evaluate(
         ProceduralKind::Repeat { .. } => repeat(inputs),
         ProceduralKind::Noise { .. } => noise_node(inputs),
         ProceduralKind::Smooth { .. } => smooth(inputs),
+        ProceduralKind::ComponentMaster { .. } | ProceduralKind::Component { .. } => {
+            component(inputs)
+        }
     }
+}
+
+/// A Smart Component publishes its **props**, and nothing else (Task 10.6
+/// RULE 1).
+///
+/// The artwork an instance draws is its member clones: ordinary authored nodes
+/// that the primitive pass evaluates like any other. Running them through this
+/// pass as well would compose every shape twice, so there is no geometry port
+/// here — a component is a *view* of the scene plus a set of parametric slots.
+///
+/// What is procedural about it is the props. Each one is republished as a value
+/// port, which is how a colour prop reaches the slots that read it (the document
+/// variable table is `f64`-only, so a colour cannot live there) and how
+/// [`vectra_core::Command::SetComponentProp`]'s write becomes visible to the
+/// dependency graph. An operand the pass could not resolve still publishes a
+/// neutral value of the port's type: a missing prop must degrade, not take the
+/// node's readers down with it.
+fn component(inputs: &NodeInputs<'_>) -> Result<BTreeMap<PortId, GeometryData>, ProceduralError> {
+    let mut out: BTreeMap<PortId, GeometryData> = BTreeMap::new();
+    for port in inputs.outputs {
+        let value = match inputs.operands.get(port) {
+            Some(value) => value.clone(),
+            None => match inputs.kind.operand_type(port) {
+                Some(vectra_core::PortType::Color) => GeometryData::Color(Color::WHITE),
+                Some(vectra_core::PortType::Point) => GeometryData::Point(Point2::ZERO),
+                _ => GeometryData::Scalar(0.0),
+            },
+        };
+        out.insert(port.clone(), value);
+    }
+    Ok(out)
 }
 
 /// The value of a scalar operand, or a typed failure naming the port.
