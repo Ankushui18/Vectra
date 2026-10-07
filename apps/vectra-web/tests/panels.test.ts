@@ -161,6 +161,11 @@ function fixture(): SnapshotWire {
         name: 'Guides',
         visible: false,
         locked: true,
+        // Task 10.7 RULE 3's two flags: this fixture is deliberately plain, so
+        // the layer-flag tests read their own states.
+        alpha_locked: false,
+        clipping_mask: false,
+        clipped_to: null,
         children: ['c'],
         child_names: ['Grid'],
         child_is_group: [false],
@@ -174,6 +179,9 @@ function fixture(): SnapshotWire {
         name: 'Ink',
         visible: true,
         locked: false,
+        alpha_locked: false,
+        clipping_mask: false,
+        clipped_to: 'guides',
         children: ['a', 'b', 'dot', 'ring', 'speck'],
         child_names: ['Square', 'Circle', 'Dot', 'Ring', 'Speck'],
         child_is_group: [false, true, false, true, false],

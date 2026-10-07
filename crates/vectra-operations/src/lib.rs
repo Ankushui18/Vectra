@@ -24,12 +24,19 @@
 //! * [`ops`] — the four operations as plain region → region functions.
 //! * [`evaluator`] — [`OperationsEvaluator`]: document + primitive scene →
 //!   virtual nodes + diagnostics.
+//! * [`clip`] — Task 10.7 RULE 3: alpha lock (a drawing boundary) and clipping
+//!   masks (a live `region ∩ mask` reshape of the scene).
 
+pub mod clip;
 pub mod convert;
 pub mod error;
 pub mod evaluator;
 pub mod ops;
 
+pub use clip::{
+    clip_polyline, clip_region, clipped_path, clipped_primitive, contains_point, content_region,
+    empty_region, enclosed_area, mask_region, region_of, region_of_nodes, ClipReport, ClipState,
+};
 pub use convert::{
     multi_polygon_to_path, path_area, path_to_multi_polygon, region_area, FLATTEN_TOLERANCE,
 };

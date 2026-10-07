@@ -60,6 +60,31 @@ pub struct LayerRecord {
     pub visible: bool,
     #[serde(default)]
     pub locked: bool,
+    /// **Alpha Lock** (Task 10.7 RULE 3a): new artwork on this layer is
+    /// constrained to the layer's *existing* content.
+    ///
+    /// Like the eye and the padlock this is a flag, not a document rewrite: it
+    /// never reaches the evaluator, and toggling it changes no geometry. What it
+    /// changes is the **drawing boundary** — a committed stroke on an
+    /// alpha-locked layer is intersected with the layer's content before it is
+    /// stored (see `vectra_operations::clip` and the engine's `commit_draft`),
+    /// which is exactly what Procreate's alpha lock does to a stroke: it clips
+    /// it to the alpha the layer already has.
+    ///
+    /// On an *empty* locked layer there is nothing to clip against, so nothing
+    /// is added — a refusal a designer can read, not a silently empty stroke.
+    #[serde(default)]
+    pub alpha_locked: bool,
+    /// **Clipping Mask** (Task 10.7 RULE 3b): this layer shows only where it
+    /// overlaps the layer **below** it.
+    ///
+    /// Unlike alpha lock this *is* geometry: the scene pass reshapes every node
+    /// on a clipping layer to `region(node) ∩ region(layer below)`, live (see
+    /// `vectra_operations::clip::ClipState::apply`, run by the engine's
+    /// `settle`). The layer below keeps drawing in full — it is the mask, not a
+    /// victim of it, which is Procreate's rule.
+    #[serde(default)]
+    pub clipping_mask: bool,
     #[serde(default)]
     pub children: Vec<NodeId>,
 }
@@ -75,6 +100,8 @@ impl LayerRecord {
             name: name.into(),
             visible: true,
             locked: false,
+            alpha_locked: false,
+            clipping_mask: false,
             children: Vec::new(),
         }
     }
@@ -164,6 +191,24 @@ impl LayerRegistry {
         layer: &LayerId,
     ) -> Option<&'a ArtboardRecord> {
         boards.iter().find(|board| board.has_layer(layer))
+    }
+
+    /// The layer directly **below** `id` — the mask a clipping layer clips to.
+    ///
+    /// `None` for the bottom layer, and for an id no layer carries. Both mean
+    /// the same thing to a clipping layer: there is nothing to clip to, so
+    /// nothing shows (the scene pass reads it that way, and the panel disables
+    /// the toggle for the bottom row).
+    pub fn below(&self, id: &LayerId) -> Option<&LayerRecord> {
+        let index = self.layers.iter().position(|layer| &layer.id == id)?;
+        index
+            .checked_sub(1)
+            .and_then(|below| self.layers.get(below))
+    }
+
+    /// Where the layer sits in the back → front order.
+    pub fn index_of(&self, id: &LayerId) -> Option<usize> {
+        self.layers.iter().position(|layer| &layer.id == id)
     }
 
     /// Which layer lists this node, and where in that layer's order.

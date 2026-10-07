@@ -12,6 +12,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { beginDrag, endDrag, updateDrag } from '../src/engine/commands';
+import { engineIsOlderThanUi, VectraClient } from '../src/engine/client';
 import {
   aiCorrectionRows,
   aiPanelState,
@@ -785,6 +786,8 @@ test('a run reports its headline, attempts, dirty ids and corrections', () => {
   const receipt: AiExecuteWire = {
     status: 'ok',
     headline: '1 command(s) in 2 attempts, 1 node(s) re-evaluated',
+    // RULE 4: what the panel shows is the sentence, so the wire carries it.
+    prose: '✨ Adjusted 1 value.',
     corrections: 1,
     report: {
       prompt: 'round the corners of dot by 8',
@@ -816,6 +819,7 @@ test('a run reports its headline, attempts, dirty ids and corrections', () => {
   };
   const state = aiPanelState(null, receipt);
   assert.equal(state.headline, receipt.headline);
+  assert.equal(state.prose, receipt.prose, 'the sentence survives the panel');
   assert.equal(state.attempts, 2);
   assert.deepEqual(state.dirty, [A]);
   assert.equal(state.corrections.length, 1);
@@ -870,4 +874,73 @@ test('the grounding line counts the engine summary it was built from', () => {
   assert.equal(summaryCounts(summary), '1 node · 1 variable · 0 expressions · 0 constraints');
   assert.equal(summaryCounts(null), 'no summary');
   assert.equal(summaryCounts({ ...summary, nodes: [], variables: [] }).startsWith('0 nodes · 0 variables'), true);
+});
+
+// ── Task 10.6 RULE 4: the plan is described, never dumped ────────────────────
+
+test('every plan row reads as a phrase a designer would say, never as JSON', () => {
+  const rows = aiPlanRows([
+    { type: 'AddConstraint', constraint: { id: 'c1', kind: 'vertical' } },
+    { type: 'ApplyOperation', id: 'op1', kind: 'union', inputs: ['a', 'b'] },
+    { type: 'SetParameter', node_id: 'a', property: 'corner_radius', value: 0 },
+    { type: 'CreateComponent', id: 'm1', name: 'Badge' },
+    { type: 'SomethingBrandNew', node_id: 'a' },
+  ]);
+  assert.deepEqual(
+    rows.map((row) => row.label),
+    [
+      'Add a constraint',
+      'Unify the shapes',
+      'Adjust',
+      'Create a component',
+      'something brand new',
+    ],
+  );
+  // The tag is still on the row for anyone who wants it; the *reading* is not.
+  assert.equal(rows[0].tag, 'AddConstraint');
+  for (const row of rows) {
+    assert.ok(!row.label.includes('{'), row.label);
+    assert.ok(!row.label.includes('_'), row.label);
+  }
+});
+
+test('no panel text ever contains a brace — RULE 4 is checkable', () => {
+  const state = aiPanelState(
+    {
+      status: 'ok',
+      applies: false,
+      prompt: 'align perfectly',
+      plan: [
+        { type: 'AddConstraint', constraint: { id: 'c1' } },
+        { type: 'SetParameter', node_id: 'a', property: 'x' },
+      ],
+      notes: [],
+      attempt: 1,
+    },
+    null,
+  );
+  const shown = [state.summary, state.headline ?? '', ...state.plan.map((row) => row.label)];
+  for (const line of shown) {
+    assert.ok(!/[{}\[\]"]/.test(line), `${line} looks like JSON`);
+  }
+});
+
+// ── Task 10.6: an engine older than the UI degrades in one sentence ──────────
+
+test('the Task 10.6 surface is probed, not assumed', () => {
+  assert.equal(engineIsOlderThanUi({}), true, 'no methods at all');
+  const half = {
+    set_selection: () => '{}',
+    component_view: () => '{}',
+    // structural_macros missing: the chips would vanish silently otherwise.
+  };
+  assert.equal(engineIsOlderThanUi(half), true, 'a partial surface is an old surface');
+  const full = {
+    set_selection: () => '{}',
+    component_view: () => '{}',
+    structural_macros: () => '[]',
+  };
+  assert.equal(engineIsOlderThanUi(full), false);
+  assert.match(VectraClient.STALE_ENGINE, /build-wasm\.sh/);
+  assert.ok(!VectraClient.STALE_ENGINE.includes('{'));
 });

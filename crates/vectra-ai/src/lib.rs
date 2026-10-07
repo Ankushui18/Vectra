@@ -73,9 +73,12 @@ pub mod schema;
 
 pub use error::{AiError, Correction, MAX_ATTEMPTS};
 pub use exec::{
-    dirty_ids, execute, execute_plan, preview, CommandHost, CoreHost, ExecutionReport, Preview,
+    dirty_ids, execute, execute_plan, preview, prose_for, CommandHost, CoreHost, ExecutionReport,
+    Preview,
 };
-pub use planner::{ChatPlanner, HeuristicPlanner, Plan, PlanRequest, Planner, ScriptedPlanner};
+pub use planner::{
+    phrasings, ChatPlanner, HeuristicPlanner, Plan, PlanRequest, Planner, ScriptedPlanner,
+};
 pub use prompt::{correction_prompt, system_prompt, SYSTEM_PROMPT};
 pub use schema::{
     check_context, compile_plan, parse_reply, plan_json, render_plan, resolve_plan, NEW_ID_PREFIX,

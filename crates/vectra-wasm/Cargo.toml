@@ -30,6 +30,11 @@ vectra-export.workspace = true
 vectra-ai.workspace = true
 vectra-render.workspace = true
 wgpu.workspace = true
+# `lyon`'s path type is named in `draw.rs`'s Task 10.7 clip helpers
+# (`draft_path`/`draft_from_path`), which hand a draft to
+# `vectra_operations`' region clip. It is a *type* name only: the shell still
+# does no path construction of its own — `vectra_geometry::paths` does.
+lyon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true
@@ -60,5 +65,14 @@ wasm-bindgen-futures.workspace = true
 # the same document. The dependency is dev-only — the shipped boundary still
 # knows nothing about files.
 [dev-dependencies]
+# The law tests (Task 10.6) are property-based: the Component Prop Law and the
+# Icon Scaling Law are statements about *every* design size, stroke and ladder,
+# so they are generated rather than listed.
+proptest.workspace = true
 vectra-draw.workspace = true
 vectra-file = { path = "../vectra-file", version = "0.1.0" }
+# Task 10.7 RULE 3a's laws compare *regions*: the alpha-locked stroke's geometry
+# against the layer's own artwork. The regions come out of `vectra-operations`
+# as `geo` types, and naming a type in a test signature is the whole reason this
+# is a test-only dependency — the shell itself still learns nothing about `geo`.
+geo.workspace = true

@@ -131,6 +131,10 @@ pub struct ExecutionReport {
     pub corrections: Vec<Correction>,
     /// The planner's notes across attempts.
     pub notes: Vec<String>,
+    /// The commands that were applied, in order — what [`ExecutionReport::prose`]
+    /// reads to describe the change to a designer (RULE 4).
+    #[serde(default, skip_serializing)]
+    pub commands: Vec<Command>,
     /// The document summary *after* the plan (what the next prompt would see).
     pub summary: DocumentSummary,
 }
@@ -153,6 +157,131 @@ impl ExecutionReport {
             self.plan.len()
         )
     }
+
+    /// The **designer's** sentence (Task 10.6 RULE 4): what happened, in words,
+    /// with no JSON, no ids and no command names.
+    ///
+    /// The plan is grouped by what the change *means* — constraints were
+    /// applied, a shape was unified, a component was made — because a person who
+    /// typed "make this geometric" wants to know what changed about their
+    /// drawing, not which enum arrived at the engine.
+    pub fn prose(&self) -> String {
+        prose_for(&self.commands)
+    }
+}
+
+/// `✨ Applied 3 constraints and unified the shape.`
+pub fn prose_for(commands: &[Command]) -> String {
+    let mut constraints = 0usize;
+    let mut boolean_ops = 0usize;
+    let mut components = 0usize;
+    let mut instances = 0usize;
+    let mut duplicates = 0usize;
+    let mut values = 0usize;
+    let mut shapes = 0usize;
+    let mut artboards = 0usize;
+    let mut procedural = 0usize;
+    let mut other = 0usize;
+    let mut visit = |command: &Command| match command {
+        Command::AddConstraint { .. } => constraints += 1,
+        Command::ApplyOperation { .. } => boolean_ops += 1,
+        Command::CreateComponent { .. } => components += 1,
+        Command::InstantiateComponent { .. } => instances += 1,
+        Command::DuplicateNode { .. } => duplicates += 1,
+        Command::SetParameter { .. } | Command::SetVariable { .. } => values += 1,
+        Command::CreateNode { .. } => shapes += 1,
+        Command::CreateArtboard { .. } => artboards += 1,
+        Command::AddProceduralNode { .. } | Command::SetProceduralOperand { .. } => procedural += 1,
+        Command::Batch { commands } => {
+            for inner in commands {
+                // Recursion through the closure is not possible; `Batch` is
+                // flattened before it gets here in practice, and a nested one
+                // counts as one change rather than being lost.
+                if matches!(
+                    inner,
+                    Command::AddConstraint { .. }
+                        | Command::ApplyOperation { .. }
+                        | Command::CreateComponent { .. }
+                        | Command::InstantiateComponent { .. }
+                        | Command::DuplicateNode { .. }
+                ) {
+                    other += 1;
+                } else {
+                    values += 1;
+                }
+            }
+        }
+        _ => other += 1,
+    };
+    for command in commands {
+        visit(command);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if constraints > 0 {
+        parts.push(format!(
+            "applied {constraints} constraint{}",
+            if constraints == 1 { "" } else { "s" }
+        ));
+    }
+    if boolean_ops > 0 {
+        parts.push(if boolean_ops == 1 {
+            "unified the shape".to_string()
+        } else {
+            format!("unified {boolean_ops} shapes")
+        });
+    }
+    if components > 0 {
+        parts.push("turned the selection into a component".to_string());
+    }
+    if instances > 0 {
+        parts.push(format!(
+            "placed {instances} instance{}",
+            if instances == 1 { "" } else { "s" }
+        ));
+    }
+    if duplicates > 0 {
+        parts.push(format!(
+            "made {duplicates} cop{}",
+            if duplicates == 1 { "y" } else { "ies" }
+        ));
+    }
+    if procedural > 0 {
+        parts.push("wired the procedural graph".to_string());
+    }
+    if artboards > 0 {
+        parts.push(format!(
+            "added {artboards} artboard{}",
+            if artboards == 1 { "" } else { "s" }
+        ));
+    }
+    if shapes > 0 {
+        parts.push(format!(
+            "added {shapes} shape{}",
+            if shapes == 1 { "" } else { "s" }
+        ));
+    }
+    if values > 0 {
+        parts.push(format!(
+            "adjusted {values} value{}",
+            if values == 1 { "" } else { "s" }
+        ));
+    }
+    if other > 0 && parts.is_empty() {
+        parts.push("updated the document".to_string());
+    }
+    if parts.is_empty() {
+        return "✨ Nothing to change".to_string();
+    }
+    let joined = match parts.len() {
+        1 => parts.pop().unwrap_or_default(),
+        2 => format!("{} and {}", parts[0], parts[1]),
+        _ => {
+            let last = parts.pop().unwrap_or_default();
+            format!("{} and {last}", parts.join(", "))
+        }
+    };
+    format!("✨ {}{}", joined[..1].to_uppercase(), &joined[1..])
 }
 
 /// Generate a plan without applying it — the AI panel's *preview*.
@@ -212,11 +341,13 @@ pub fn execute<P: Planner, H: CommandHost>(
 
         let mut events = Vec::new();
         let mut applied = 0usize;
+        let mut applied_commands: Vec<Command> = Vec::new();
         let mut failure: Option<(String, Option<Value>)> = None;
         for command in &plan.commands {
             match host.apply(command) {
                 Ok(mut produced) => {
                     applied += 1;
+                    applied_commands.push(command.clone());
                     events.append(&mut produced);
                 }
                 Err(error) => {
@@ -236,6 +367,7 @@ pub fn execute<P: Planner, H: CommandHost>(
                     events,
                     corrections,
                     notes,
+                    commands: applied_commands,
                     summary: host.summary(),
                 })
             }
@@ -330,6 +462,7 @@ pub fn execute_plan<H: CommandHost>(
         events,
         corrections: Vec::new(),
         notes: Vec::new(),
+        commands: commands.to_vec(),
         summary: host.summary(),
     })
 }

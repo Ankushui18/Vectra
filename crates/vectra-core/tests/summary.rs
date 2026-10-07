@@ -350,3 +350,86 @@ fn the_text_block_reads_like_a_prompt_section() {
     );
     assert!(text.contains("$base * 4"), "{}", text);
 }
+
+// ── Task 10.6 RULE 2: the selection and the artboard ────────────────────
+
+#[test]
+fn a_captured_selection_is_in_draw_order_and_says_what_this_means() {
+    let (doc, card, dot) = document();
+    // Handed over front-to-back on purpose: the summary reports draw order.
+    let summary = DocumentSummary::capture_selection(&doc, &[dot, card]);
+
+    assert_eq!(
+        summary.selection,
+        vec![card.to_string(), dot.to_string()],
+        "the selection must be in the document's own order"
+    );
+    assert_eq!(
+        summary
+            .selected()
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["card", "Dot"]
+    );
+    // The prose is a sentence for a designer, and never JSON (RULE 4).
+    let prose = summary.selection_prose();
+    assert!(prose.contains("card") && prose.contains("Dot"), "{prose}");
+    assert!(!prose.contains('{') && !prose.contains('"'), "{prose}");
+
+    // …and the text block teaches the model what "this" means.
+    let text = summary.to_text();
+    assert!(text.contains("SELECTION (2 node(s)"), "{text}");
+    assert!(text.contains("this\" means these"), "{text}");
+    assert!(text.contains("card") && text.contains("Dot"), "{text}");
+}
+
+#[test]
+fn no_selection_says_so_instead_of_guessing() {
+    let (doc, _card, _dot) = document();
+    let summary = DocumentSummary::capture(&doc);
+    assert!(summary.selection.is_empty());
+    assert_eq!(summary.selection_prose(), "Nothing selected");
+    assert!(summary.selected().is_empty());
+    let text = summary.to_text();
+    assert!(
+        text.contains("SELECTION: none (\"this\" refers to the whole document)"),
+        "{text}"
+    );
+    // An empty selection is not a line of blanks.
+    assert!(!text.contains("SELECTION (0 node(s)"), "{text}");
+}
+
+#[test]
+fn a_selection_of_a_deleted_node_drops_the_id_rather_than_dangling() {
+    let (mut doc, card, dot) = document();
+    doc.remove_node(dot).expect("the node is there to remove");
+    let summary = DocumentSummary::capture_selection(&doc, &[card, dot]);
+    assert_eq!(summary.selection, vec![card.to_string()]);
+    assert_eq!(summary.selected().len(), 1);
+}
+
+#[test]
+fn the_active_artboard_is_the_scale_context_for_a_prompt() {
+    let (mut doc, card, _dot) = document();
+    // No artboard yet: the field is absent rather than zero-filled, so a model
+    // cannot read a 0×0 frame as a real one.
+    assert!(DocumentSummary::capture(&doc).artboard.is_none());
+
+    let board = vectra_core::new_artboard_id();
+    doc.artboards.insert(
+        vectra_core::ArtboardRecord::new(board, "Icon 24".to_string(), 0.0, 0.0, 24.0, 24.0),
+        None,
+    );
+    // The first board inserted becomes the active one; assert that rather than
+    // assume it, so this test fails loudly if the registry's rule changes.
+    assert_eq!(doc.artboards.active_id(), Some(board));
+    let summary = DocumentSummary::capture_selection(&doc, &[card]);
+    let artboard = summary.artboard.as_ref().expect("the active artboard");
+    assert_eq!(artboard.name, "Icon 24");
+    assert_eq!((artboard.width, artboard.height), (24.0, 24.0));
+    assert_eq!(artboard.id, board.to_string());
+    let text = summary.to_text();
+    assert!(text.contains("ARTBOARD"), "{text}");
+    assert!(text.contains("Icon 24"), "{text}");
+}

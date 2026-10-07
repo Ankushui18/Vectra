@@ -52,7 +52,7 @@
 //!   types, port matching, cycles, arity. The AI layer never duplicates an engine
 //!   rule; it only makes sure the model was talking about *this* document.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 use vectra_core::{new_constraint_id, new_expression_id, new_node_id, Command, DocumentSummary};
@@ -69,11 +69,77 @@ pub const NEW_ID_PREFIX: &str = "$new:";
 /// [`resolve_id_value`]. Every other key is unambiguous.
 fn key_namespace(key: &str) -> Option<IdNamespace> {
     match key {
-        "node_id" | "node" | "inputs" => Some(IdNamespace::Node),
+        "node_id" | "node" | "inputs" | "members" | "target" | "source" | "master" | "parent" => {
+            Some(IdNamespace::Node)
+        }
         "track_id" => Some(IdNamespace::Track),
         "expression_id" => Some(IdNamespace::Expression),
         "constraint_id" => Some(IdNamespace::Constraint),
+        // Task 10.2/10.6: a layer belongs to an artboard, and artwork is
+        // assigned to layers — both are ids a plan may mint and then reference.
+        "layer" | "layers" => Some(IdNamespace::Layer),
+        "artboard" => Some(IdNamespace::Artboard),
         _ => None,
+    }
+}
+
+/// The ids a plan may *reference*, per namespace.
+///
+/// The summary is the model's whole world, so the check is "is this id one the
+/// summary showed you" — for every kind of id a command can carry, not just
+/// nodes: a Task 10.6 macro names an artboard it makes and a master it just
+/// created, and a plan that names an artboard the document does not have is
+/// exactly as wrong as one that names a missing node.
+struct Known<'a> {
+    nodes: BTreeSet<&'a str>,
+    expressions: BTreeSet<&'a str>,
+    constraints: BTreeSet<&'a str>,
+    tracks: BTreeSet<&'a str>,
+    artboards: BTreeSet<&'a str>,
+}
+
+impl<'a> Known<'a> {
+    fn of(summary: &'a DocumentSummary) -> Self {
+        let mut artboards = BTreeSet::new();
+        if let Some(artboard) = &summary.artboard {
+            artboards.insert(artboard.id.as_str());
+        }
+        Self {
+            nodes: summary.node_ids(),
+            expressions: summary
+                .expressions
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect(),
+            constraints: summary
+                .constraints
+                .iter()
+                .map(|constraint| constraint.id.as_str())
+                .collect(),
+            tracks: summary
+                .tracks
+                .iter()
+                .map(|track| track.name.as_str())
+                .collect(),
+            artboards,
+        }
+    }
+
+    /// True ⟺ the summary showed the model this id.
+    ///
+    /// Layers are the one namespace with no listing in the summary: a plan never
+    /// needs to reference an *existing* layer (the active layer receives new
+    /// artwork, and `AssignNodeToLayer` is a sentence the model is not asked to
+    /// invent), so a layer id must be one the plan minted itself.
+    fn contains(&self, ns: IdNamespace, id: &str) -> bool {
+        match ns {
+            IdNamespace::Node => self.nodes.contains(id),
+            IdNamespace::Expression => self.expressions.contains(id),
+            IdNamespace::Constraint => self.constraints.contains(id),
+            IdNamespace::Track => self.tracks.contains(id),
+            IdNamespace::Layer => false,
+            IdNamespace::Artboard => self.artboards.contains(id),
+        }
     }
 }
 
@@ -84,6 +150,8 @@ enum IdNamespace {
     Track,
     Expression,
     Constraint,
+    Layer,
+    Artboard,
 }
 
 impl IdNamespace {
@@ -93,6 +161,8 @@ impl IdNamespace {
             Self::Track => vectra_core::TrackId::new().to_string(),
             Self::Expression => new_expression_id().to_string(),
             Self::Constraint => new_constraint_id().to_string(),
+            Self::Layer => vectra_core::new_layer_id().to_string(),
+            Self::Artboard => vectra_core::new_artboard_id().to_string(),
         }
     }
 
@@ -102,10 +172,12 @@ impl IdNamespace {
     fn accepts(self, qualifier: &str) -> bool {
         match qualifier {
             "" => true,
-            "node" | "op" | "operation" => self == Self::Node,
+            "node" | "op" | "operation" | "component" | "instance" => self == Self::Node,
             "track" => self == Self::Track,
             "expression" | "expr" => self == Self::Expression,
             "constraint" => self == Self::Constraint,
+            "layer" => self == Self::Layer,
+            "board" | "artboard" => self == Self::Artboard,
             // A bare slug (`$new:card`) is a name, and names are accepted
             // wherever the *default* namespace of that slot is what the model
             // means. Being strict here would reject `$new:card` on a node slot
@@ -122,6 +194,22 @@ fn id_namespace_of_command(tag: &str) -> IdNamespace {
         "RemoveConstraint" | "SetConstraintEnabled" | "AddConstraint" => IdNamespace::Constraint,
         "DefineExpression" | "RemoveExpression" => IdNamespace::Expression,
         "SetMotionTrack" | "RemoveMotionTrack" => IdNamespace::Track,
+        // Task 10.2: an artboard list and a layer list, each with its own ids.
+        "CreateArtboard"
+        | "DeleteArtboard"
+        | "RenameArtboard"
+        | "SetArtboardBounds"
+        | "SetArtboardBackground"
+        | "SetActiveArtboard" => IdNamespace::Artboard,
+        "CreateLayer"
+        | "DeleteLayer"
+        | "RenameLayer"
+        | "SetLayerVisible"
+        | "SetLayerLocked"
+        | "SetLayerAlphaLocked"
+        | "SetLayerClippingMask"
+        | "ReorderLayer"
+        | "SetActiveLayer" => IdNamespace::Layer,
         // `CreateNode` / `ApplyOperation` / `RemoveOperation` / `RemoveProceduralNode`
         // / `SetOperationEnabled` / `SetProceduralEnabled`: an `OperationId` is a
         // `NodeId` in this engine, and procedural nodes are keyed by node id.
@@ -211,7 +299,7 @@ pub fn resolve_plan_with_json(
         Value::Array(items) => items.clone(),
         other => vec![other.clone()],
     };
-    let known: std::collections::BTreeSet<&str> = summary.node_ids();
+    let known = Known::of(summary);
     let mut minted: BTreeMap<String, String> = BTreeMap::new();
     let mut out = Vec::with_capacity(array.len());
     for (index, item) in array.iter().enumerate() {
@@ -283,7 +371,7 @@ fn unknown_fields(reply: &Value, canonical: &Value, path: &str, out: &mut Vec<St
 
 fn resolve_item(
     item: &Value,
-    known: &std::collections::BTreeSet<&str>,
+    known: &Known<'_>,
     minted: &mut BTreeMap<String, String>,
     index: usize,
 ) -> Result<Value, AiError> {
@@ -305,10 +393,7 @@ fn resolve_item(
     let mut out = Map::with_capacity(map.len());
     for (key, value) in map {
         let rendered = match (key.as_str(), value) {
-            (
-                "id" | "node_id" | "track_id" | "expression_id" | "constraint_id" | "node",
-                Value::String(token),
-            ) => {
+            (key, Value::String(token)) if id_slot(&tag, key) => {
                 let ns = if key == "id" {
                     default_ns
                 } else {
@@ -316,7 +401,9 @@ fn resolve_item(
                 };
                 Value::String(resolve_token(token, ns, known, minted, &tag)?)
             }
-            ("inputs", Value::Array(items)) => Value::Array(
+            // Two commands carry a *list* of node ids: a boolean's `inputs` and
+            // a component's `members`.
+            ("inputs" | "members", Value::Array(items)) => Value::Array(
                 items
                     .iter()
                     .map(|item| match item {
@@ -367,7 +454,7 @@ fn resolve_item(
 fn resolve_nested(
     map: &Map<String, Value>,
     default_ns: IdNamespace,
-    known: &std::collections::BTreeSet<&str>,
+    known: &Known<'_>,
     minted: &mut BTreeMap<String, String>,
     tag: &str,
 ) -> Result<Map<String, Value>, AiError> {
@@ -411,17 +498,32 @@ fn resolve_nested(
     Ok(out)
 }
 
+/// Whether a **top-level** field of this command holds an id.
+///
+/// Two keys are ambiguous across the enum — `source` is a node in `DuplicateNode`
+/// and an expression's own text in `DefineExpression`, and `target` is a node in
+/// `SetComponentProp` while a motion binding's `target` is a *parameter* — so the
+/// tag decides. Everything else the key table answers on its own.
+fn id_slot(tag: &str, key: &str) -> bool {
+    match key {
+        "source" => tag == "DuplicateNode",
+        "target" => tag == "SetComponentProp",
+        "inputs" | "members" => false, // resolved as lists, below
+        other => other == "id" || key_namespace(other).is_some(),
+    }
+}
+
+/// Whether a **nested** field holds an id. The same table, minus `source`: a
+/// `source` inside a payload is an expression's text or a port's name, never a
+/// node.
 fn id_key(key: &str) -> bool {
-    matches!(
-        key,
-        "id" | "node_id" | "node" | "track_id" | "expression_id" | "constraint_id"
-    )
+    key != "source" && (key == "id" || key_namespace(key).is_some())
 }
 
 fn resolve_token(
     token: &str,
     ns: IdNamespace,
-    known: &std::collections::BTreeSet<&str>,
+    known: &Known<'_>,
     minted: &mut BTreeMap<String, String>,
     tag: &str,
 ) -> Result<String, AiError> {
@@ -439,7 +541,7 @@ fn resolve_token(
         let key = format!("{qualifier}:{name}");
         return Ok(minted.entry(key).or_insert_with(|| ns.mint()).clone());
     }
-    if known.contains(token) {
+    if known.contains(ns, token) {
         return Ok(token.to_string());
     }
     Err(AiError::UnknownNodeId {
@@ -462,15 +564,20 @@ pub fn check_context(commands: &[Command], summary: &DocumentSummary) -> Result<
         summary.nodes.iter().map(|node| node.id.clone()).collect();
     let mut created: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for command in commands {
-        if let Command::CreateNode { id, .. } = command {
-            let id = id.to_string();
-            if known.contains(&id) {
-                return Err(AiError::PlanConflict {
-                    detail: format!(
-                        "`CreateNode` reuses the id of an existing node ({id}); \
-                         existing nodes are edited with `SetParameter`, and new ones use `$new:<slug>`"
-                    ),
-                });
+        // Every command that **mints** an id registers it, so a later command in
+        // the same plan may name it: a boolean's union result, a component's
+        // master, a duplicated copy, a fresh artboard. (Task 10.6's macros are
+        // exactly these chains, and the Context Law has to see them.)
+        if let Some(id) = created_id(command) {
+            if let Command::CreateNode { .. } = command {
+                if known.contains(&id) {
+                    return Err(AiError::PlanConflict {
+                        detail: format!(
+                            "`CreateNode` reuses the id of an existing node ({id}); \
+                             existing nodes are edited with `SetParameter`, and new ones use `$new:<slug>`"
+                        ),
+                    });
+                }
             }
             created.insert(id);
         }
@@ -485,6 +592,27 @@ pub fn check_context(commands: &[Command], summary: &DocumentSummary) -> Result<
         }
     }
     Ok(())
+}
+
+/// The id a command brings into existence, if it brings one into being.
+///
+/// One list, so `check_context` cannot fall behind the command enum: a new
+/// command that creates something adds its arm here and every plan that uses it
+/// keeps working.
+pub(crate) fn created_id(command: &Command) -> Option<String> {
+    match command {
+        Command::CreateNode { id, .. }
+        | Command::CreateComponent { id, .. }
+        | Command::InstantiateComponent { id, .. }
+        | Command::DuplicateNode { id, .. }
+        | Command::ApplyOperation { id, .. }
+        | Command::CreateArtboard { id, .. }
+        | Command::CreateLayer { id, .. } => Some(id.to_string()),
+        // A procedural node arrives with its own record, so its id is inside it.
+        Command::AddProceduralNode { node } => Some(node.id.to_string()),
+        Command::Batch { commands } => commands.iter().find_map(created_id),
+        _ => None,
+    }
 }
 
 /// Every node id a command reads or targets, for the context check.
@@ -560,11 +688,26 @@ fn referenced_nodes(command: &Command) -> Vec<String> {
         Command::AssignNodeToLayer { node_id, .. } | Command::DetachNodeFromLayers { node_id } => {
             push(*node_id)
         }
+        // Task 10.6 RULE 1: a component names its members and its master, a prop
+        // write names the instance it lands on — all of them must be in the AI's
+        // context before the command is allowed through.
+        Command::CreateComponent { members, .. } => {
+            for member in members {
+                push(*member);
+            }
+        }
+        Command::InstantiateComponent { master, .. } => push(*master),
+        Command::SetComponentProp { target, .. } => push(*target),
+        Command::SetComponentSpec { id, .. } => push(*id),
+        Command::DuplicateNode { source, .. } => push(*source),
         Command::CreateLayer { .. }
         | Command::DeleteLayer { .. }
         | Command::RenameLayer { .. }
         | Command::SetLayerVisible { .. }
         | Command::SetLayerLocked { .. }
+        // Task 10.7 RULE 3: the Procreate flags name a layer and no node.
+        | Command::SetLayerAlphaLocked { .. }
+        | Command::SetLayerClippingMask { .. }
         | Command::ReorderLayer { .. }
         | Command::CreateArtboard { .. }
         | Command::DeleteArtboard { .. }

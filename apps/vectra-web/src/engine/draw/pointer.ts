@@ -283,9 +283,16 @@ export function finishIntent(): DrawIntent {
 
 /**
  * The stroke the Quick Shape recogniser should look at, from a live gesture:
- * the raw document samples without their pressure channel. The recogniser is
- * engine code and takes plain points, and the *rough* stroke is the right input —
- * snapping must see what the hand did, not a tidied-up version of it.
+ * the document samples without their pressure channel.
+ *
+ * **Task 10.7 RULE 2 changed what "the samples" are.** They are the *filtered*
+ * points — StreamLine sits between the pointer and `DrawSession.extend`, so the
+ * recogniser, like the brush fitter and the pen, sees the stroke the designer
+ * asked for. That is the coherent reading of the slider: a designer who pulled
+ * StreamLine up asked for a steadier hand, and a recogniser that re-introduced
+ * the shake would be smoothing the path and then un-smoothing the decision. At
+ * 0 % the filter is the identity, so the pre-10.7 behaviour is exactly the 0 %
+ * case rather than a separate code path.
  */
 export function strokePoints(gesture: Gesture): [number, number][] {
   return gesture.samples.map((sample) => [sample.x, sample.y]);

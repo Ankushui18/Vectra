@@ -39,6 +39,8 @@ import {
   renameLayer,
   reorderLayer,
   setActiveLayer,
+  setLayerAlphaLocked,
+  setLayerClippingMask,
   setLayerLocked,
   setLayerVisible,
   setNodeParent,
@@ -388,6 +390,53 @@ export function LayersPanel({
                       }}
                     >
                       {row.locked ? '🔒' : '🔓'}
+                    </button>
+                    <button
+                      className="icon"
+                      data-testid={`layer-alpha-${row.id}`}
+                      disabled={disabled}
+                      title={
+                        row.alphaLocked
+                          ? 'Unlock alpha — new strokes may leave the layer\'s artwork'
+                          : 'Lock alpha — new strokes stay inside what this layer already holds'
+                      }
+                      aria-label={`${row.alphaLocked ? 'Unlock' : 'Lock'} alpha of layer ${row.name}`}
+                      aria-pressed={row.alphaLocked === true}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onCommand(
+                          row.alphaLocked ? 'Unlock alpha' : 'Lock alpha',
+                          setLayerAlphaLocked(row.id, !row.alphaLocked),
+                        );
+                      }}
+                    >
+                      {row.alphaLocked ? 'α' : 'a'}
+                    </button>
+                    <button
+                      className="icon"
+                      data-testid={`layer-clip-${row.id}`}
+                      // The bottom layer has nothing below it to clip to: the
+                      // toggle is disabled rather than allowed to mean
+                      // "everything disappears".
+                      disabled={disabled || !row.clippedTo}
+                      title={
+                        !row.clippedTo
+                          ? 'Nothing below this layer to clip to'
+                          : row.clippingMask
+                            ? 'Remove clipping mask — show this layer everywhere'
+                            : 'Clip to layer below — show this layer only over the layer beneath'
+                      }
+                      aria-label={`${row.clippingMask ? 'Remove clipping mask from' : 'Clip'} layer ${row.name}`}
+                      aria-pressed={row.clippingMask === true}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onCommand(
+                          row.clippingMask ? 'Remove clipping mask' : 'Clip to layer below',
+                          setLayerClippingMask(row.id, !row.clippingMask),
+                        );
+                      }}
+                    >
+                      {row.clippingMask ? '▤' : '▥'}
                     </button>
                     <button
                       className="icon"

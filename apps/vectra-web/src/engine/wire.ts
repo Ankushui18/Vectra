@@ -160,12 +160,20 @@ export type CommandWire =
   | { type: 'SetAppearances'; node_id: string; appearances: AppearanceLayerWire[] }
   | { type: 'SetNodeVisible'; id: string; visible: boolean }
   | { type: 'SetNodeLocked'; id: string; locked: boolean }
+  /** **Copy a node** — the engine's one copy primitive, which Task 10.7's
+   *  Copy/Paste gesture (RULE 1) is built on. The new id is the caller's. */
+  | { type: 'DuplicateNode'; id: string; source: string; name?: string; index?: number }
   | { type: 'RenameNode'; id: string; name: string }
   | { type: 'CreateLayer'; id: string; name: string; index?: number; artboard?: string }
   | { type: 'DeleteLayer'; id: string }
   | { type: 'RenameLayer'; id: string; name: string }
   | { type: 'SetLayerVisible'; id: string; visible: boolean }
   | { type: 'SetLayerLocked'; id: string; locked: boolean }
+  // **Task 10.7 RULE 3** — the two Procreate flags, each a command of its own
+  // (one history entry, like the eye), so the designer can undo a lock without
+  // undoing the drawing that came after it.
+  | { type: 'SetLayerAlphaLocked'; id: string; alpha_locked: boolean }
+  | { type: 'SetLayerClippingMask'; id: string; clipping_mask: boolean }
   | { type: 'ReorderLayer'; id: string; index: number }
   | { type: 'AssignNodeToLayer'; node_id: string; layer: string }
   | { type: 'DetachNodeFromLayers'; node_id: string }
@@ -464,6 +472,24 @@ export type CommandResponseWire =
   | { status: 'ok'; events: EngineEventWire[] }
   | { status: 'error'; message: string };
 
+/**
+ * A reply from one of the **Task 10.6 component verbs** (`create_component`,
+ * `instantiate_component`, `set_component_prop`, `icon_set`).
+ *
+ * The engine answers those with the ordinary command envelope *plus* three keys
+ * (see `dispatch_side_command` in `crates/vectra-wasm/src/lib.rs`): `prose` — the
+ * one-sentence receipt the UI prints verbatim (RULE 4), `label` — the same act in
+ * the log's voice, and `created` — the id the engine minted, so a panel can
+ * select what it just made instead of guessing which uuid came back. Typed here,
+ * once, rather than intersected at each call site: a reply whose `created` is not
+ * a string is a wire bug, and this is the type that says so.
+ */
+export type ComponentReplyWire = CommandResponseWire & {
+  prose?: string;
+  label?: string;
+  created?: string;
+};
+
 // ── Snapshot (UI's entire world) ───────────────────────────────────────
 
 export type SnapshotPrimitiveWire =
@@ -572,6 +598,15 @@ export interface SnapshotLayerWire {
   name: string;
   visible: boolean;
   locked: boolean;
+  /** **Task 10.7 RULE 3a**: new artwork on this layer is clipped to what the
+   *  layer already holds (the engine's commit path does the intersection). */
+  alpha_locked: boolean;
+  /** **Task 10.7 RULE 3b**: this layer shows only where it overlaps the layer
+   *  below. */
+  clipping_mask: boolean;
+  /** The layer this one clips to — `null` for the bottom layer, where the
+   *  toggle is meaningless and is therefore disabled rather than wrong. */
+  clipped_to: string | null;
   /** The layer's contents, back → front. */
   children: string[];
   /** Display names parallel to `children`. */
@@ -816,6 +851,63 @@ export interface AiCorrectionWire {
  * `applies` is always `false` and is in the wire on purpose: the panel renders
  * the plan without ever being able to claim it ran.
  */
+/**
+ * A Smart Component prop, as `component_view` publishes it (Task 10.6 RULE 1).
+ *
+ * Everything the panel needs to draw one *slider* — which is the point: the
+ * procedural graph behind it is never shown.
+ */
+export interface ComponentPropWire {
+  /** `size`, `stroke_width`, `corner_radius`, `color`. */
+  key: string;
+  /** `Size`, `Stroke`, `Corner`, `Color` — what a designer reads. */
+  label: string;
+  ty: 'scalar' | 'color';
+  /** `direct` (this prop is the value) or `scaled` (derived from another prop). */
+  law: 'direct' | 'scaled';
+  /** The value now, resolved through the document. */
+  value?: number;
+  /** `#rrggbb`, for a colour prop. */
+  color?: string;
+  /** True ⟺ the value follows another prop (a slider still edits it). */
+  derived: boolean;
+  /** The prop it follows. */
+  from?: string;
+  min: number;
+  max: number;
+}
+
+/** What the selection is, and every prop it exposes. */
+export interface ComponentViewWire {
+  status: 'ok';
+  /** `master`, `instance`, `selection` or `none`. */
+  role: string;
+  id?: string;
+  name?: string;
+  master?: string;
+  props: ComponentPropWire[];
+  instances: number;
+  can_create: boolean;
+  /** The panel's headline, written by the engine. */
+  headline: string;
+  selection: { count: number; prose: string };
+  masters: { id: string; name: string; instances: number }[];
+}
+
+/** `set_selection`'s reply: what the prompt will mean by "this". */
+export interface SelectionWire {
+  status: 'ok';
+  count: number;
+  prose: string;
+}
+
+/** One structural macro the command bar offers as a chip (RULE 2). */
+export interface StructuralMacroWire {
+  prompt: string;
+  label: string;
+  hint: string;
+}
+
 export interface AiPreviewWire {
   status: 'ok';
   prompt: string;
@@ -835,6 +927,17 @@ export interface AiPreviewWire {
  */
 export interface DocumentSummaryWire {
   version: number;
+  /** The selected node ids, draw order (Task 10.6 RULE 2). */
+  selection?: string[];
+  /** The active artboard, when there is one. */
+  artboard?: {
+    id: string;
+    name: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
   nodes: {
     id: string;
     name: string;
@@ -878,6 +981,11 @@ export interface AiReportWire {
   status: 'ok';
   /** One line: commands, attempts, what re-evaluated. */
   headline: string;
+  /**
+   * **The designer's sentence** (Task 10.6 RULE 4): "✨ Applied 3 constraints and
+   * unified the shape." The panel shows this — never the plan below it.
+   */
+  prose: string;
   report: AiReportInnerWire;
   corrections: number;
 }

@@ -1017,3 +1017,389 @@ fn every_error_code_the_ui_can_show_has_a_message() {
         assert_eq!(json["code"], error.code());
     }
 }
+
+// ── Task 10.6: the structural macros (RULE 2 and RULE 3) ────────────────
+
+/// Every `type` a structural macro is allowed to emit.
+///
+/// This *is* the AI Structural Law in one list: a macro edits the document's
+/// structure — a parameter, a copy, a boolean, a constraint, a component, an
+/// artboard — and never its pixels. There is no command in the engine that
+/// carries an image or an SVG path *payload* for the AI to reach for, and this
+/// test pins the claim where it can still fail: on the plan.
+const STRUCTURAL_COMMANDS: [&str; 9] = [
+    "SetParameter",
+    "DuplicateNode",
+    "ApplyOperation",
+    "AddConstraint",
+    "CreateComponent",
+    "InstantiateComponent",
+    "SetComponentProp",
+    "CreateArtboard",
+    "CreateLayer",
+];
+
+/// `n` squares on a diagonal, with an optional stroke — the shape of a real
+/// selection, and the fixture both the column helper below and the structural
+/// law's proptest build from.
+fn shapes(
+    n: usize,
+    spacing: f64,
+    size: f64,
+    stroke: f64,
+) -> (Engine, Vec<vectra_core::NodeId>, DocumentSummary) {
+    let mut engine = Engine::new();
+    let mut ids = Vec::new();
+    for index in 0..n {
+        let id = vectra_core::new_node_id();
+        let node = vectra_core::Node::new(
+            id,
+            format!("shape {index}"),
+            rect(
+                index as f64 * spacing,
+                index as f64 * spacing,
+                size,
+                size,
+                2.0,
+            ),
+        );
+        engine
+            .dispatch(Command::CreateNode {
+                id,
+                kind: node.kind.clone(),
+                name: Some(node.name.clone()),
+                index: None,
+            })
+            .unwrap();
+        if stroke > 0.0 {
+            // A style slot is a *parameter*, not part of `NodeKind`, so it takes
+            // its own command — the same one the UI's stroke field sends.
+            engine
+                .dispatch(Command::SetParameter {
+                    node_id: id,
+                    property: "style.stroke_width".to_string(),
+                    value: vectra_core::ParamValue::float_literal(stroke),
+                })
+                .unwrap();
+        }
+        ids.push(id);
+    }
+    let summary = DocumentSummary::capture_selection(engine.document(), &ids);
+    (engine, ids, summary)
+}
+
+/// A document with `n` shapes in a column, and the summary that selects them.
+fn column_of(n: usize) -> (Engine, Vec<vectra_core::NodeId>, DocumentSummary) {
+    let mut engine = Engine::new();
+    let mut ids = Vec::new();
+    for index in 0..n {
+        let id = vectra_core::new_node_id();
+        engine
+            .dispatch(Command::CreateNode {
+                id,
+                kind: rect(index as f64 * 37.0, index as f64 * 23.0, 24.0, 24.0, 4.0),
+                name: Some(format!("chip {index}")),
+                index: None,
+            })
+            .unwrap();
+        ids.push(id);
+    }
+    let summary = DocumentSummary::capture_selection(engine.document(), &ids);
+    (engine, ids, summary)
+}
+
+fn plan_for(summary: &DocumentSummary, prompt: &str) -> Vec<Command> {
+    let request = PlanRequest {
+        prompt,
+        summary,
+        correction: None,
+    };
+    HeuristicPlanner::new()
+        .plan(&request)
+        .unwrap_or_else(|error| panic!("`{prompt}` → {error}"))
+        .commands
+}
+
+#[test]
+fn the_planner_understands_the_macro_phrasings_it_advertises() {
+    let (_engine, _ids, summary) = column_of(3);
+    for prompt in HeuristicPlanner::MACRO_PHRASINGS {
+        let commands = plan_for(&summary, prompt);
+        assert!(!commands.is_empty(), "`{prompt}` produced nothing");
+        let notes = HeuristicPlanner::new()
+            .plan(&PlanRequest {
+                prompt,
+                summary: &summary,
+                correction: None,
+            })
+            .unwrap()
+            .notes;
+        assert!(!notes.is_empty(), "`{prompt}` explained nothing");
+        // The hint line the panel shows lists both grammars.
+        assert!(vectra_ai::phrasings().contains(&prompt));
+    }
+}
+
+#[test]
+fn every_macro_command_is_structural_and_named_by_the_schema() {
+    let (_engine, _ids, summary) = column_of(4);
+    for prompt in HeuristicPlanner::MACRO_PHRASINGS {
+        for (index, command) in plan_for(&summary, prompt).into_iter().enumerate() {
+            let value = serde_json::to_value(&command).unwrap();
+            let kind = value["type"].as_str().unwrap_or("?");
+            assert!(
+                STRUCTURAL_COMMANDS.contains(&kind),
+                "`{prompt}` command {index} is `{kind}`, which is not a structural edit"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_macro_answers_in_a_sentence_a_designer_can_read() {
+    for (prompt, size) in [
+        ("make this geometric", 3usize),
+        ("create 4 color variations", 2),
+        ("align perfectly", 3),
+        ("make this a component", 2),
+    ] {
+        let (mut engine, _ids, summary) = column_of(size);
+        let mut host = CoreHost::new(std::mem::take(&mut engine));
+        let commands = plan_for(&summary, prompt);
+        let report = exec::execute_plan(&mut host, prompt, &commands).expect("applies");
+        let prose = report.prose();
+        assert!(prose.starts_with('✨'), "{prose}");
+        assert_ne!(prose, "✨ Nothing to change", "`{prompt}` changed nothing");
+        for forbidden in ['{', '[', '"', '\\'] {
+            assert!(
+                !prose.contains(forbidden),
+                "`{prompt}` prose is JSON-shaped: {prose}"
+            );
+        }
+        // …and it is not a uuid, either: RULE 4 bans ids from the sentence.
+        assert!(
+            !prose
+                .split_whitespace()
+                .any(|word| word.len() == 36 && word.matches('-').count() == 4),
+            "`{prompt}` prose names an id: {prose}"
+        );
+    }
+}
+
+#[test]
+fn the_icon_macro_builds_the_ladder_with_a_scaled_size_prop() {
+    // A 24px glyph with a 2px stroke and 4px corners: RULE 3's own example.
+    let (engine, _ids, summary) = shapes(1, 0.0, 24.0, 2.0);
+    let commands = plan_for(&summary, "generate an icon set at 16 32 48");
+
+    // One component, then four commands per size, in order.
+    assert!(
+        matches!(commands[0], Command::CreateComponent { .. }),
+        "{commands:?}"
+    );
+    assert_eq!(commands.len(), 1 + 3 * 4, "{commands:?}");
+    let mut sizes = Vec::new();
+    for (index, group) in commands[1..].chunks(4).enumerate() {
+        let expected = [16.0, 32.0, 48.0][index];
+        match (&group[0], &group[1], &group[2], &group[3]) {
+            (
+                Command::CreateArtboard { width, height, .. },
+                Command::CreateLayer { .. },
+                Command::InstantiateComponent { .. },
+                Command::SetComponentProp { prop, value, .. },
+            ) => {
+                assert_eq!((*width, *height), (expected, expected));
+                assert_eq!(prop, "size");
+                sizes.push(match value {
+                    vectra_core::ParamValue::Float(vectra_core::Parameter::Literal(size)) => *size,
+                    other => panic!("size prop is not a literal: {other:?}"),
+                });
+            }
+            other => panic!("unexpected ladder step: {other:?}"),
+        }
+    }
+    assert_eq!(sizes, vec![16.0, 32.0, 48.0]);
+
+    // Applying it: the master, three instances, and a `stroke_width` /
+    // `corner_radius` prop that is *derived* rather than authored — the law
+    // RULE 3 rests on.
+    let mut engine = engine;
+    let mut host = CoreHost::new(std::mem::take(&mut engine));
+    let report = exec::execute_plan(&mut host, "generate an icon set", &commands).expect("applies");
+    assert!(report.prose().contains("instance"), "{}", report.prose());
+    let doc = host.engine.document();
+    let master = doc
+        .procedural
+        .in_order()
+        .find(|node| vectra_core::component::is_master(doc, node.id))
+        .map(|node| node.id)
+        .expect("a master");
+    assert_eq!(vectra_core::component::instances_of(doc, master).len(), 3);
+    let spec = vectra_core::component::spec_of(doc, master).expect("spec");
+    let stroke = spec.get("stroke_width").expect("stroke prop");
+    assert!(stroke.law.is_scaled() && stroke.law.scale() == Some("size"));
+    let radius = spec.get("corner_radius").expect("radius prop");
+    assert!(radius.law.is_scaled());
+    // Each instance owns its variables and its expressions — no shared ids.
+    let mut variables: Vec<String> = Vec::new();
+    for instance in vectra_core::component::instances_of(doc, master) {
+        let instance_spec = vectra_core::component::spec_of(doc, instance).expect("instance spec");
+        let size = instance_spec
+            .variable("size")
+            .expect("size variable")
+            .clone();
+        assert!(!variables.contains(&size), "two instances share {size}");
+        variables.push(size);
+        let stroke = instance_spec.get("stroke_width").expect("stroke prop");
+        assert_ne!(
+            stroke.expressions(),
+            spec.get("stroke_width").unwrap().expressions(),
+            "the instance reuses the master's expression"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// **The AI Structural Law.** For any selection of one to four shapes and
+    /// every macro phrasing: the plan compiles against the summary the model was
+    /// given, every command in it is a *structural* command, the plan applies to
+    /// the document with no engine error, and the result is reported as a
+    /// sentence. Nothing is emitted that could be a picture.
+    #[test]
+    fn law_ai_structural(
+        // Two is the floor on purpose: a one-shape selection has no structural
+        // macro available (`align perfectly` is asserted separately, below).
+        count in 2usize..=4,
+        spacing in 8.0f64..=64.0,
+        size in 4.0f64..=48.0,
+        stroke in 0.0f64..=3.0,
+    ) {
+        let (mut engine, ids, _summary) = shapes(count, spacing, size, stroke);
+
+        // One live document, macro after macro: the law is about what a designer
+        // gets when they run each chip in turn, and a plan is only meaningful
+        // against the document it was planned on (ids are uuids).
+        for prompt in HeuristicPlanner::MACRO_PHRASINGS {
+            let summary = DocumentSummary::capture_selection(engine.document(), &ids);
+            let commands = plan_for(&summary, prompt);
+            prop_assert!(!commands.is_empty(), "{}", prompt);
+            for command in &commands {
+                let value = serde_json::to_value(command).unwrap();
+                let kind = value["type"].as_str().unwrap_or("?");
+                prop_assert!(
+                    STRUCTURAL_COMMANDS.contains(&kind),
+                    "`{}` emitted `{}`",
+                    prompt,
+                    kind
+                );
+            }
+            let mut host = CoreHost::new(std::mem::take(&mut engine));
+            let report = exec::execute_plan(&mut host, prompt, &commands);
+            prop_assert!(report.is_ok(), "`{}` was refused: {:?}", prompt, report.err());
+            let report = report.unwrap();
+            prop_assert!(report.prose().starts_with('✨'), "{}", report.prose());
+            prop_assert!(!report.prose().contains('{'), "{}", report.prose());
+            prop_assert!(!host.engine.document().nodes.is_empty(), "{}", prompt);
+            engine = host.engine;
+        }
+    }
+}
+
+/// A host whose grounding is **stale**: it keeps handing the planner the summary
+/// it captured before the document changed, which is exactly what a UI does when
+/// the designer deletes a shape while the command bar is open. The macro must
+/// notice the engine's refusal, drop the dead reference and finish — the Task
+/// 9.0 self-correction loop, driven by a macro rather than by a sentence.
+struct StaleHost {
+    host: CoreHost,
+    stale: DocumentSummary,
+}
+
+impl CommandHost for StaleHost {
+    fn apply(&mut self, command: &Command) -> Result<Vec<EngineEvent>, String> {
+        self.host.apply(command)
+    }
+    fn rollback(&mut self, steps: usize) -> Result<(), String> {
+        self.host.rollback(steps)
+    }
+    fn summary(&self) -> DocumentSummary {
+        self.stale.clone()
+    }
+}
+
+#[test]
+fn law_a_macro_self_corrects_around_a_stale_selection() {
+    let (engine, ids, summary) = column_of(3);
+    let stale = summary.clone();
+    // The designer deletes the middle shape after the summary was taken.
+    let mut host = CoreHost::new(engine);
+    host.engine
+        .dispatch(Command::DeleteNode { id: ids[1] })
+        .unwrap();
+    let mut host = StaleHost {
+        host,
+        stale: stale.clone(),
+    };
+
+    let report = exec::execute(&HeuristicPlanner::new(), &mut host, "make this geometric")
+        .expect("the macro recovers");
+    assert!(
+        !report.corrections.is_empty(),
+        "the engine's refusal was never fed back: {report:?}"
+    );
+    assert!(
+        report
+            .corrections
+            .iter()
+            .any(|correction| correction.error.contains("does not exist")
+                || correction.error.contains("not found")),
+        "unexpected correction: {:?}",
+        report.corrections
+    );
+    // The dead id is gone from what was applied …
+    let applied = serde_json::to_string(&report.plan).unwrap();
+    assert!(
+        !applied.contains(&ids[1].to_string()),
+        "a command still names the deleted node: {applied}"
+    );
+    // … the surviving shapes were edited, and the sentence says so.
+    assert!(report.commands.len() < plan_for(&stale, "make this geometric").len());
+    assert!(report.prose().starts_with('✨'), "{}", report.prose());
+    assert!(!host.host.engine.document().nodes.contains_key(&ids[1]));
+}
+
+#[test]
+fn a_macro_that_cannot_run_says_why_in_a_sentence() {
+    // One shape selected: "align perfectly" is understood, and impossible. The
+    // refusal names what is missing instead of claiming the phrase is unknown —
+    // and it is a sentence, not a stack of JSON.
+    let (_engine, _ids, summary) = column_of(1);
+    let request = PlanRequest {
+        prompt: "align perfectly",
+        summary: &summary,
+        correction: None,
+    };
+    let error = HeuristicPlanner::new()
+        .plan(&request)
+        .expect_err("one shape cannot form a column");
+    assert_eq!(error.code(), "unrecognized-prompt");
+    let message = error.to_string();
+    assert!(message.contains("two shapes"), "{message}");
+    assert!(!message.contains('{'), "{message}");
+
+    // An empty selection still falls through to the sentence grammar's own
+    // message rather than a macro-specific one.
+    let (engine, _ids, _) = column_of(1);
+    let empty = DocumentSummary::capture(engine.document());
+    let request = PlanRequest {
+        prompt: "align perfectly",
+        summary: &empty,
+        correction: None,
+    };
+    let error = HeuristicPlanner::new()
+        .plan(&request)
+        .expect_err("nothing selected");
+    assert_eq!(error.code(), "unrecognized-prompt");
+}

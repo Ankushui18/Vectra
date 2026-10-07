@@ -574,12 +574,57 @@ export function exportSummary(envelope: ExportEnvelopeWire | null): string {
 export interface AiPlanRow {
   /** 1-based position in the plan. */
   index: number;
-  /** The command's own tag: `CreateNode`, `SetParameter`, … */
+  /** The command's own tag — the row's machine hint, never the headline. */
   tag: string;
+  /**
+   * **The designer's wording** (RULE 4): "Add vertical constraint", "Set width",
+   * "Unify the shapes". The row shows this; JSON is never rendered.
+   */
+  label: string;
   /** The id or slot the row addresses, when it names one. */
   target: string;
-  /** The command's JSON, verbatim — the row's tooltip. */
+  /** The command's JSON — kept for the row's `title` only. */
   json: string;
+}
+
+/**
+ * A command's tag, said the way a designer would say it.
+ *
+ * The tag stays on the row for anyone who wants it (and for the tests), but the
+ * *reading* is this. A missing entry falls back to the tag split on capitals —
+ * "ApplyOperation" becomes "Apply operation" rather than a wall of JSON.
+ */
+const AI_LABELS: Record<string, string> = {
+  CreateNode: 'Add a shape',
+  DeleteNode: 'Delete a shape',
+  DuplicateNode: 'Duplicate',
+  SetParameter: 'Adjust',
+  SetVariable: 'Set a variable',
+  RemoveVariable: 'Remove a variable',
+  DefineExpression: 'Define a formula',
+  RemoveExpression: 'Remove a formula',
+  AddConstraint: 'Add a constraint',
+  RemoveConstraint: 'Remove a constraint',
+  SetConstraintEnabled: 'Toggle a constraint',
+  ApplyOperation: 'Unify the shapes',
+  RemoveOperation: 'Remove the union',
+  CreateComponent: 'Create a component',
+  InstantiateComponent: 'Place an instance',
+  SetComponentProp: 'Set a component prop',
+  SetComponentSpec: 'Edit the component props',
+  CreateArtboard: 'Add an artboard',
+  CreateLayer: 'Add a layer',
+  SetActiveArtboard: 'Switch artboard',
+  SetActiveLayer: 'Switch layer',
+  BindMotion: 'Animate',
+  SetMotionTrack: 'Set a keyframe track',
+  AddProceduralNode: 'Add a procedural node',
+  SetProceduralOperand: 'Set a procedural input',
+};
+
+function humaniseTag(tag: string): string {
+  if (AI_LABELS[tag]) return AI_LABELS[tag];
+  return tag.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
 }
 
 /** The id-ish field a command carries, for the row's `target` column. */
@@ -624,6 +669,7 @@ export function aiPlanRows(plan: unknown[]): AiPlanRow[] {
     return {
       index: position + 1,
       tag,
+      label: humaniseTag(tag),
       target: firstStringField(command),
       json: JSON.stringify(entry),
     };
@@ -654,6 +700,11 @@ export function aiCorrectionRows(corrections: AiCorrectionWire[]): AiCorrectionR
 export interface AiPanelState {
   /** The section's one-line status. */
   summary: string;
+  /**
+   * **The designer's sentence** (RULE 4) — "✨ Applied 3 constraints and unified
+   * the shape." This is what the panel shows after a run; never the plan JSON.
+   */
+  prose: string | null;
   /** The typed code, when the last call failed. */
   code: string | null;
   /** Rows for the plan under the prompt — the preview, or a failed plan. */
@@ -706,6 +757,7 @@ export function aiPanelState(
   if (isAiError(receipt)) {
     return {
       summary: `refused — ${receipt.code}`,
+      prose: null,
       code: receipt.code,
       plan,
       headline: null,
@@ -717,7 +769,8 @@ export function aiPanelState(
   }
   if (isAiReport(receipt)) {
     return {
-      summary: receipt.headline,
+      summary: receipt.prose || receipt.headline,
+      prose: receipt.prose || null,
       code: null,
       plan: aiPlanRows(receipt.report.plan),
       headline: receipt.headline,
@@ -730,6 +783,7 @@ export function aiPanelState(
   if (isAiError(preview)) {
     return {
       summary: `cannot plan — ${preview.code}`,
+      prose: null,
       code: preview.code,
       plan,
       headline: null,
@@ -742,6 +796,7 @@ export function aiPanelState(
   if (isAiPreview(preview)) {
     return {
       summary: `${plan.length} command(s) ready — nothing applied`,
+      prose: null,
       code: null,
       plan,
       headline: null,
@@ -753,6 +808,7 @@ export function aiPanelState(
   }
   return {
     summary: 'idle — describe an edit, then Generate',
+    prose: null,
     code: null,
     plan: [],
     headline: null,

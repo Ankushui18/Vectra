@@ -220,6 +220,16 @@ export class VectraEngine {
      */
     bind_spring(node_id: string, property: string, target: number, stiffness: number, damping: number): string;
     /**
+     * The Smart Component inspector's whole world: what the selection is, and
+     * every prop it exposes (Task 10.6 RULE 1, RULE 4).
+     */
+    component_view(): string;
+    /**
+     * **Create Component** (RULE 1): the selected nodes become a master whose
+     * props every instance will set for itself.
+     */
+    create_component(members_json: string, name?: string | null): string;
+    /**
      * The dependency graph, for the inspector panel.
      */
     dependencies(): string;
@@ -461,6 +471,15 @@ export class VectraEngine {
      */
     get_snapshot(): string;
     /**
+     * **Generate Icon Set** (RULE 3): one instance per size, each on its own
+     * artboard, all scaled by the master's `size` prop.
+     */
+    icon_set(master: string, sizes_json: string): string;
+    /**
+     * **Place an instance** of a component (RULE 1).
+     */
+    instantiate_component(master: string, name?: string | null): string;
+    /**
      * **The idle signal** (Frame Budget Law): `false` means the document is at
      * rest at the current clock, so the React frame loop must stop scheduling
      * `render_frame` until something moves again.
@@ -499,15 +518,6 @@ export class VectraEngine {
      * the pointer.
      */
     pointer_move(renderer: Renderer, x: number, y: number): string;
-    /**
-     * The procedural graph, for the Procedural panel and the smoke harness.
-     *
-     * Three things the panel cannot get anywhere else: the registry's own
-     * order (a chain has a direction, a JSON object does not), each operand's
-     * **effective** value (`(variable)`, not the number the template started
-     * with — see `ProceduralNode::describe`), and the value each output port
-     * last published.
-     */
     procedural_json(): string;
     /**
      * **The palette**: every kind the engine can build, with its ports and the
@@ -549,12 +559,36 @@ export class VectraEngine {
      */
     render_frame(renderer: Renderer): string;
     /**
+     * **Set one prop on one instance** (RULE 1) — the slider the panel draws.
+     *
+     * `value_json` is a typed [`vectra_core::ParamValue`]
+     * (`{"Float":{"Literal":32}}` / `{"Color":{"Literal":"#2266ee"}}`), which
+     * is exactly what `component_view` publishes per prop type.
+     */
+    set_component_prop(target: string, prop: string, value_json: string): string;
+    /**
      * Register or replace a keyframe track (undoable document state).
      *
      * Takes the track as JSON so the wire schema lives in one place
      * (`MotionTrack`'s own `Serialize`/`Deserialize`), exactly like commands.
      */
     set_motion_track(track_json: string): string;
+    /**
+     * The procedural graph, for the Procedural panel and the smoke harness.
+     *
+     * Three things the panel cannot get anywhere else: the registry's own
+     * order (a chain has a direction, a JSON object does not), each operand's
+     * **effective** value (`(variable)`, not the number the template started
+     * with — see `ProceduralNode::describe`), and the value each output port
+     * last published.
+     * Tell the engine what the designer has selected.
+     *
+     * The selection is *state*, not a command: it is not undoable, it does not
+     * touch the document, and it exists so that a Make Magic prompt can mean
+     * "this". The reply carries the panel's one-line description, so the UI
+     * never has to compose a sentence about ids.
+     */
+    set_selection(ids_json: string): string;
     /**
      * Set a state flag — a host **input**, in the same category as the pointer
      * position and the clock. Never undoable, never in the history.
@@ -575,6 +609,11 @@ export class VectraEngine {
      * readers (Phase 4 motion rides this exact path).
      */
     set_time(t: number): string;
+    /**
+     * The structural macros the command bar offers as one-tap chips (RULE 2):
+     * the prompt text, plus what it will do, in the designer's words.
+     */
+    structural_macros(): string;
     /**
      * Undo one step. Returns a [`CommandResponse`] JSON string.
      *
@@ -614,6 +653,8 @@ export interface InitOutput {
     readonly vectraengine_ai_prompt: (a: number) => [number, number];
     readonly vectraengine_bind_hover_spring: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly vectraengine_bind_spring: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly vectraengine_component_view: (a: number) => [number, number];
+    readonly vectraengine_create_component: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_dependencies: (a: number) => [number, number];
     readonly vectraengine_dispatch_command: (a: number, b: number, c: number) => [number, number];
     readonly vectraengine_document_json: (a: number) => [number, number];
@@ -636,6 +677,8 @@ export interface InitOutput {
     readonly vectraengine_export_to_svg: (a: number) => [number, number];
     readonly vectraengine_force_full_evaluation: (a: number) => [number, number];
     readonly vectraengine_get_snapshot: (a: number) => [number, number];
+    readonly vectraengine_icon_set: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly vectraengine_instantiate_component: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly vectraengine_is_animating: (a: number) => number;
     readonly vectraengine_motion_json: (a: number) => [number, number];
     readonly vectraengine_new: () => number;
@@ -646,15 +689,18 @@ export interface InitOutput {
     readonly vectraengine_redo: (a: number) => [number, number];
     readonly vectraengine_remove_motion_track: (a: number, b: number, c: number) => [number, number];
     readonly vectraengine_render_frame: (a: number, b: number) => [number, number];
+    readonly vectraengine_set_component_prop: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly vectraengine_set_motion_track: (a: number, b: number, c: number) => [number, number];
+    readonly vectraengine_set_selection: (a: number, b: number, c: number) => [number, number];
     readonly vectraengine_set_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly vectraengine_set_time: (a: number, b: number) => [number, number];
+    readonly vectraengine_structural_macros: (a: number) => [number, number];
     readonly vectraengine_undo: (a: number) => [number, number];
-    readonly wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined___js_sys_b6d8f5494c076ea6___Function_fn_wasm_bindgen_2ad7bc35cc533b99___JsValue_____wasm_bindgen_2ad7bc35cc533b99___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
-    readonly wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue__core_608f92abc48d28da___result__Result_____wasm_bindgen_2ad7bc35cc533b99___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wasm_bindgen_2ad7bc35cc533b99___JsValue______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___wgpu_d00bd68c658e9b86___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen_2ad7bc35cc533b99___convert__closures_____invoke___bool__true_: (a: number, b: number) => number;
+    readonly wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined___js_sys_2a712b92d59091be___Function_fn_wasm_bindgen_e751eaa9cf7806ea___JsValue_____wasm_bindgen_e751eaa9cf7806ea___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue__core_7d5f0a2ba6a62c33___result__Result_____wasm_bindgen_e751eaa9cf7806ea___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wasm_bindgen_e751eaa9cf7806ea___JsValue______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___wgpu_cf189251abdffb5b___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_e751eaa9cf7806ea___convert__closures_____invoke___bool__true_: (a: number, b: number) => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

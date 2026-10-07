@@ -68,7 +68,7 @@ use vectra_export::{
 use vectra_expression::ExpressionEngine;
 use vectra_geometry::Diagnostic;
 use vectra_motion::{own_spring, reanchor, MotionEngine};
-use vectra_operations::OperationsEvaluator;
+use vectra_operations::{ClipState, OperationsEvaluator};
 use vectra_procedural::{ProceduralEngine, ProceduralEvaluation};
 use wasm_bindgen::prelude::*;
 
@@ -170,6 +170,10 @@ pub struct VectraEngine {
     pending_procedural: Vec<NodeId>,
     /// Diagnostics from the last operations pass, merged into the snapshot.
     operation_diagnostics: Vec<Diagnostic>,
+    /// The nodes the designer has selected (Task 10.6 RULE 2). The command bar
+    /// sends this before running a prompt, so "make this geometric" has a
+    /// "this"; the panel reads it to decide what it is inspecting.
+    selection: std::cell::RefCell<Vec<NodeId>>,
     /// The motion evaluator (Task 6.0): springs, state flags and keyframe
     /// tracks, resolved at the clock. Holds a synced copy of
     /// `Document::motion` and the host-set state flags — *inputs*, never history.
@@ -185,6 +189,13 @@ pub struct VectraEngine {
     /// brush's samples. It holds *input*, never document state: nothing here is
     /// undoable until `draw_*_commit` turns it into commands.
     draw: crate::draw::DrawTools,
+    /// **Task 10.7 RULE 3b**: the clipping masks' bookkeeping — each clipped
+    /// node's *document* geometry (its baseline) and what the scene currently
+    /// shows. A derivation cache, not document state: see
+    /// [`vectra_operations::ClipState`] for why recomputing from a baseline,
+    /// rather than from the clipped result, is the difference between a mask and
+    /// a shrink.
+    clip: ClipState,
 }
 
 /// `hover:` prefix on the per-node state flag a hover spring reads.
@@ -517,6 +528,8 @@ impl VectraEngine {
         Self {
             core,
             expressions: ExpressionEngine::new(),
+
+            selection: std::cell::RefCell::new(Vec::new()),
             graph: DependencyGraph::new(),
             scene: IncrementalScene::new(),
             operations: OperationsEvaluator::new(),
@@ -530,6 +543,7 @@ impl VectraEngine {
             drag: None,
             render_dirty: DirtyLedger::new(),
             draw: crate::draw::DrawTools::new(),
+            clip: ClipState::new(),
         }
     }
 
@@ -918,7 +932,7 @@ impl VectraEngine {
     /// never advertise something the planner cannot do.
     #[wasm_bindgen]
     pub fn ai_phrasings(&self) -> String {
-        serde_json::to_string(&HeuristicPlanner::PHRASINGS).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&vectra_ai::phrasings()).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Generate commands from a prompt, **without applying anything** — the AI
@@ -997,6 +1011,272 @@ impl VectraEngine {
     /// **effective** value (`(variable)`, not the number the template started
     /// with — see `ProceduralNode::describe`), and the value each output port
     /// last published.
+    // ── Task 10.6: Smart Components (RULE 1) ────────────────────────────────
+    /// Tell the engine what the designer has selected.
+    ///
+    /// The selection is *state*, not a command: it is not undoable, it does not
+    /// touch the document, and it exists so that a Make Magic prompt can mean
+    /// "this". The reply carries the panel's one-line description, so the UI
+    /// never has to compose a sentence about ids.
+    #[wasm_bindgen]
+    pub fn set_selection(&self, ids_json: &str) -> String {
+        let ids: Vec<String> = match serde_json::from_str(ids_json) {
+            Ok(ids) => ids,
+            Err(error) => {
+                return format!(
+                    "{{\"status\":\"error\",\"message\":{}}}",
+                    serde_json::to_string(&format!("invalid selection: {error}"))
+                        .unwrap_or_else(|_| "\"invalid selection\"".to_string())
+                )
+            }
+        };
+        let parsed: Vec<NodeId> = ids
+            .iter()
+            .filter_map(|id| vectra_core::parse_node_id(id))
+            .collect();
+        let mut stored = self.selection.borrow_mut();
+        *stored = parsed;
+        drop(stored);
+        let summary = self.document_summary_value();
+        #[derive(serde::Serialize)]
+        struct SelectionWire<'a> {
+            status: &'a str,
+            count: usize,
+            prose: String,
+        }
+        serde_json::to_string(&SelectionWire {
+            status: "ok",
+            count: summary.selection.len(),
+            prose: summary.selection_prose(),
+        })
+        .unwrap_or_else(|_| "{\"status\":\"ok\"}".to_string())
+    }
+
+    /// The Smart Component inspector's whole world: what the selection is, and
+    /// every prop it exposes (Task 10.6 RULE 1, RULE 4).
+    #[wasm_bindgen]
+    pub fn component_view(&self) -> String {
+        let doc = self.core.document();
+        let selection = self.selection.borrow().clone();
+        let view = vectra_core::component::inspect(doc, &selection);
+        let masters: Vec<serde_json::Value> = doc
+            .procedural
+            .in_order()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    vectra_core::ProceduralKind::ComponentMaster { .. }
+                )
+            })
+            .map(|node| {
+                let instances = vectra_core::component::instances_of(doc, node.id).len();
+                serde_json::json!({
+                    "id": node.id.to_string(),
+                    "name": node.name,
+                    "instances": instances,
+                })
+            })
+            .collect();
+        let summary = self.document_summary_value();
+        let mut value = match serde_json::to_value(&view) {
+            Ok(value) => value,
+            Err(error) => {
+                return format!(
+                    "{{\"status\":\"error\",\"message\":{}}}",
+                    serde_json::to_string(&format!("serialization: {error}"))
+                        .unwrap_or_else(|_| "\"serialization\"".to_string())
+                )
+            }
+        };
+        if let Some(map) = value.as_object_mut() {
+            map.insert("status".to_string(), serde_json::json!("ok"));
+            map.insert(
+                "selection".to_string(),
+                serde_json::json!({
+                    "count": summary.selection.len(),
+                    "prose": summary.selection_prose(),
+                }),
+            );
+            map.insert("masters".to_string(), serde_json::json!(masters));
+        }
+        value.to_string()
+    }
+
+    /// **Create Component** (RULE 1): the selected nodes become a master whose
+    /// props every instance will set for itself.
+    #[wasm_bindgen]
+    pub fn create_component(&mut self, members_json: &str, name: Option<String>) -> String {
+        let ids: Vec<String> = match serde_json::from_str(members_json) {
+            Ok(ids) => ids,
+            Err(error) => return CommandResponse::err_json(format!("invalid members: {error}")),
+        };
+        let members: Vec<NodeId> = ids
+            .iter()
+            .filter_map(|id| vectra_core::parse_node_id(id))
+            .collect();
+        if members.is_empty() {
+            return CommandResponse::err_json("select at least one shape first");
+        }
+        let command = Command::CreateComponent {
+            id: vectra_core::new_node_id(),
+            name,
+            members,
+            props: Vec::new(),
+        };
+        self.dispatch_side_command(&command)
+    }
+
+    /// **Place an instance** of a component (RULE 1).
+    #[wasm_bindgen]
+    pub fn instantiate_component(&mut self, master: &str, name: Option<String>) -> String {
+        let Some(master) = vectra_core::parse_node_id(master) else {
+            return CommandResponse::err_json("invalid id".to_string());
+        };
+        let command = Command::InstantiateComponent {
+            id: vectra_core::new_node_id(),
+            master,
+            name,
+            index: None,
+        };
+        self.dispatch_side_command(&command)
+    }
+
+    /// **Set one prop on one instance** (RULE 1) — the slider the panel draws.
+    ///
+    /// `value_json` is a typed [`vectra_core::ParamValue`]
+    /// (`{"Float":{"Literal":32}}` / `{"Color":{"Literal":"#2266ee"}}`), which
+    /// is exactly what `component_view` publishes per prop type.
+    #[wasm_bindgen]
+    pub fn set_component_prop(&mut self, target: &str, prop: &str, value_json: &str) -> String {
+        let Some(target) = vectra_core::parse_node_id(target) else {
+            return CommandResponse::err_json("invalid id".to_string());
+        };
+        let value: ParamValue = match serde_json::from_str(value_json) {
+            Ok(value) => value,
+            Err(error) => return CommandResponse::err_json(format!("invalid value: {error}")),
+        };
+        let command = Command::SetComponentProp {
+            target,
+            prop: prop.to_string(),
+            value,
+        };
+        self.dispatch_side_command(&command)
+    }
+
+    /// **Generate Icon Set** (RULE 3): one instance per size, each on its own
+    /// artboard, all scaled by the master's `size` prop.
+    #[wasm_bindgen]
+    pub fn icon_set(&mut self, master: &str, sizes_json: &str) -> String {
+        let Some(master) = vectra_core::parse_node_id(master) else {
+            return CommandResponse::err_json("invalid id".to_string());
+        };
+        let sizes: Vec<f64> = match serde_json::from_str(sizes_json) {
+            Ok(sizes) => sizes,
+            Err(error) => return CommandResponse::err_json(format!("invalid sizes: {error}")),
+        };
+        let sizes: Vec<f64> = sizes
+            .into_iter()
+            .filter(|size| *size >= 4.0 && *size <= 512.0)
+            .collect();
+        if sizes.is_empty() {
+            return CommandResponse::err_json("give at least one size between 4 and 512");
+        }
+        let plan = match vectra_core::component::icon_set_plan(self.core.document(), master, &sizes)
+        {
+            Ok(plan) => plan,
+            Err(error) => return CommandResponse::err_json(error.to_string()),
+        };
+        let command = Command::Batch { commands: plan };
+        self.dispatch_side_command(&command)
+    }
+
+    /// The structural macros the command bar offers as one-tap chips (RULE 2):
+    /// the prompt text, plus what it will do, in the designer's words.
+    #[wasm_bindgen]
+    pub fn structural_macros(&self) -> String {
+        #[derive(serde::Serialize)]
+        struct MacroWire {
+            prompt: &'static str,
+            label: &'static str,
+            hint: &'static str,
+        }
+        let macros = [
+            MacroWire {
+                prompt: "make this geometric",
+                label: "Make geometric",
+                hint: "snap to whole numbers, square the corners, unify into one shape",
+            },
+            MacroWire {
+                prompt: "create 4 color variations",
+                label: "Color variations",
+                hint: "four copies, one palette, offsets kept even",
+            },
+            MacroWire {
+                prompt: "align perfectly",
+                label: "Align perfectly",
+                hint: "one column, even spacing, held by constraints",
+            },
+            MacroWire {
+                prompt: "make this a component",
+                label: "Create component",
+                hint: "size, stroke, corners and colour become props",
+            },
+            MacroWire {
+                prompt: "generate an icon set at 16 32 48",
+                label: "Icon set",
+                hint: "one artboard per size, stroke and corners scaled",
+            },
+        ];
+        serde_json::to_string(&macros).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Run a command that a panel (not the canvas) built, through the same gate
+    /// sequence as `dispatch_command`, and answer with the designer's sentence
+    /// (RULE 4) instead of a raw event list.
+    fn dispatch_side_command(&mut self, command: &Command) -> String {
+        let json = match serde_json::to_string(command) {
+            Ok(json) => json,
+            Err(error) => return CommandResponse::err_json(format!("serialization: {error}")),
+        };
+        let response = self.dispatch_command(&json);
+        // The envelope is a JSON object; add the prose rather than wrapping it,
+        // so the panel has one shape to read whichever endpoint it called.
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&response) else {
+            return response;
+        };
+        let prose = vectra_ai::prose_for(std::slice::from_ref(command));
+        if let Some(map) = value.as_object_mut() {
+            map.insert("prose".to_string(), serde_json::json!(prose));
+            map.insert("label".to_string(), serde_json::json!(command.label()));
+            // What the command *made*, so the panel can select it without
+            // knowing which id the engine minted: the node it created, or — for
+            // a batch like the icon set — the last one it created.
+            if let Some(created) = Self::created_by(command) {
+                map.insert(
+                    "created".to_string(),
+                    serde_json::json!(created.to_string()),
+                );
+            }
+        }
+        value.to_string()
+    }
+
+    /// The id a command creates, if it creates one — the panel's "select what I
+    /// just made". A batch reports the *last* id it creates: for the icon set
+    /// that is the final instance, which is the one whose props the designer
+    /// wants to see.
+    fn created_by(command: &Command) -> Option<vectra_core::NodeId> {
+        match command {
+            Command::CreateNode { id, .. }
+            | Command::CreateComponent { id, .. }
+            | Command::InstantiateComponent { id, .. }
+            | Command::DuplicateNode { id, .. } => Some(*id),
+            Command::CreateArtboard { id, .. } => Some(*id),
+            Command::Batch { commands } => commands.iter().rev().find_map(Self::created_by),
+            _ => None,
+        }
+    }
+
     #[wasm_bindgen]
     pub fn procedural_json(&self) -> String {
         let doc = self.core.document();
@@ -1409,7 +1689,7 @@ impl VectraEngine {
             .with_expression(&self.expressions)
             .with_motion(&self.motion)
             .with_procedural(&self.procedural);
-        DocumentSummary::capture_in(self.core.document(), &ctx)
+        DocumentSummary::capture_selection_in(self.core.document(), &ctx, &self.selection.borrow())
     }
 
     /// A caller-supplied summary, or the live one when the caller sent nothing.
@@ -2098,7 +2378,18 @@ impl VectraEngine {
         // removed operation is not — the command that removed it may not have
         // dirtied any primitive at all.
         let mut retired = self.prune_disabled_operations();
-        let dirty = self.graph.dirty_ids_for_events(&events);
+        // **Task 10.7 RULE 3b, first half**: a node that was clipped and no
+        // longer is has to be asked for the *document's* geometry again — its
+        // primitive in the cache is our derivative, and dropping the mask must
+        // not be the same thing as deleting the artwork. The evaluator does the
+        // restoring; we only say which ids lost their mask.
+        let restored = self.clip.pending_restores(self.core.document());
+        let mut dirty = self.graph.dirty_ids_for_events(&events);
+        for id in restored {
+            if !dirty.contains(&id) {
+                dirty.push(id);
+            }
+        }
         let report = self.patch(&dirty);
         // **RULE 4**: an eye or a padlock is a renderer-side flag. The evaluator
         // never heard about it (the four presentation events produce no dirty
@@ -2119,8 +2410,20 @@ impl VectraEngine {
         // that just recomputed, because a `Source` that reads a boolean has no
         // graph edge to notice it.
         retired.extend(self.run_procedural_fixpoint(&report, &recomputed));
+        // **Task 10.7 RULE 3b, second half**: the clip pass runs last — after the
+        // flags were re-derived (so a mask is what is on the canvas, not last
+        // frame's eye state) and after every pass that can write geometry (so a
+        // clipped node is clipped whatever composed it). The ids it rewrote join
+        // the event, because the renderer's ledger is the only thing that knows
+        // this happened: the evaluator resolved no parameter for them.
+        let clipped = self.clip_layers(&report.dirty);
         let mut ids = report.dirty;
         for id in retired {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        for id in clipped {
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -2129,6 +2432,35 @@ impl VectraEngine {
         let event = self.dirty_event(ids, report.mode);
         events.push(event);
         events
+    }
+
+    /// **The clipping-mask pass** (Task 10.7 RULE 3b).
+    ///
+    /// Rewrites every node on a clipping layer to `region(node) ∩ region(layer
+    /// below)` — from the node's *baseline* geometry, refreshed only for the ids
+    /// the evaluator just re-derived (`reevaluated`), so a live mask masks rather
+    /// than shrinks. Returns the ids whose appearance changed.
+    ///
+    /// Cheap to skip: with no clipping layer in the document and nothing left
+    /// over from one, the pass does not walk the scene at all.
+    fn clip_layers(&mut self, reevaluated: &[NodeId]) -> Vec<NodeId> {
+        // Field-level borrows, the way `patch` does it: the clip pass needs the
+        // document *and* the scene at once, and neither is a copy.
+        let Self {
+            core,
+            scene,
+            clip,
+            render_dirty,
+            ..
+        } = self;
+        if clip.is_idle(core.document()) {
+            return Vec::new();
+        }
+        let report = clip.apply(scene.scene_mut(), core.document(), reevaluated);
+        if !report.changed.is_empty() {
+            render_dirty.note(report.changed.clone(), vectra_core::EvalMode::Incremental);
+        }
+        report.changed
     }
 
     /// Re-derive the presentation flags of the cached scene and tell the
@@ -2672,12 +3004,16 @@ fn ai_report_json(report: &ExecutionReport) -> String {
     struct Envelope<'a> {
         status: &'a str,
         headline: String,
+        /// The designer's sentence: what changed, in words (RULE 4). The panel
+        /// shows this; it never renders `report` as JSON.
+        prose: String,
         report: &'a ExecutionReport,
         corrections: usize,
     }
     serde_json::to_string(&Envelope {
         status: "ok",
         headline: report.headline(),
+        prose: report.prose(),
         report,
         corrections: report.corrections.len(),
     })

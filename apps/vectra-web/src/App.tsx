@@ -42,6 +42,9 @@ import NavigationOverlay from './components/NavigationOverlay';
 import LayersPanel from './components/LayersPanel';
 import AppearancePanel from './components/AppearancePanel';
 import ArtboardBar from './components/ArtboardBar';
+import ComponentPanel from './components/ComponentPanel';
+import MagicBar from './components/MagicBar';
+import DrawSettingsPanel from './components/DrawSettingsPanel';
 import { designerHint, showsMathPanels, toolForShortcut } from './engine/draw/tools';
 import type { ToolId } from './engine/draw/tools';
 import { DrawSession, initialSession, pointerCursor } from './engine/draw/session';
@@ -49,12 +52,25 @@ import type { DrawSessionState } from './engine/draw/session';
 import {
   cancelIntent,
   downIntent,
+  DRAG_SLOP_PX,
   finishIntent,
   isDrag,
   moveIntent,
   strokePoints,
   upIntent,
 } from './engine/draw/pointer';
+// **Task 10.7**: the invisible UI (RULE 1), the smooth hand (RULE 2) and the
+// drop (RULE 4). Three pure modules, and this file is the only place that turns
+// their answers into engine calls — the recognisers decide, `App` dispatches.
+import { modifierClick, TouchRouter } from './engine/draw/touch';
+import type { TouchAction } from './engine/draw/touch';
+import { StreamLine, streamlineAmount } from './engine/draw/streamline';
+import {
+  dropChangesStack,
+  dropStatus,
+  planColorDrop,
+  stackWithColor,
+} from './engine/draw/colordrop';
 import { holdHint } from './engine/draw/quick-shape';
 import {
   anchorLabel,
@@ -85,8 +101,10 @@ import {
   deleteNode,
   disconnectProcedural,
   distanceConstraint,
+  duplicateNode,
   endDrag,
   modifierOperation,
+  setAppearances,
   motionTrack,
   pointOperand,
   proceduralNode,
@@ -128,11 +146,13 @@ import {
   summaryLabels,
 } from './engine/view-model';
 import {
+  appearanceStack,
   gridStyle,
   overlayBoards,
   panGestureAllowed,
   showsAppearancePanel,
   selectedNode,
+  stackToWire,
   wheelZoomFactor,
   ZOOM_STEP,
 } from './engine/panels';
@@ -154,6 +174,9 @@ import type {
   ProceduralReportWire,
   SnapshotWire,
   StrengthWire,
+  ComponentPropWire,
+  ComponentViewWire,
+  StructuralMacroWire,
 } from './engine/wire';
 
 // ── Log ──────────────────────────────────────────────────────────────────
@@ -187,6 +210,12 @@ interface CanvasPaneProps {
   onPointerMove: (e: ReactPointerEvent<HTMLCanvasElement>) => void;
   /** …and report that it left, which is not a position. */
   onPointerLeave: () => void;
+  /** **RULE 1**: the touch gesture's decision point — a two- or three-finger
+   *  tap is decided when the last contact lifts, not when it lands. */
+  onPointerUp: (e: ReactPointerEvent<HTMLCanvasElement>) => void;
+  /** A contact was lost (a browser takeover, a blur): the gesture ends, and
+   *  nothing fires. A cancelled gesture must never undo. */
+  onPointerCancel: (e: ReactPointerEvent<HTMLCanvasElement>) => void;
   /** True once the engine has at least one node to draw. */
   hasNodes: boolean;
   /** GPU status line; `null` while the device is still coming up. */
@@ -207,6 +236,8 @@ function CanvasPane({
   onPanUp,
   onPointerMove,
   onPointerLeave,
+  onPointerUp,
+  onPointerCancel,
   hasNodes,
   status,
   frame,
@@ -218,6 +249,13 @@ function CanvasPane({
   return (
     <div
       className="canvas-wrap"
+      // **RULE 1, the browser's half.** A canvas is a context-menu target on
+      // every platform, and a long press on a touchscreen is how a designer
+      // opens one by accident. The menu is refused at the *pane*, so the canvas
+      // and every overlay inside it inherit the refusal — the gesture layer in
+      // `engine/draw/touch.ts` can then own the multi-finger gestures without
+      // the browser answering first.
+      onContextMenu={(event) => event.preventDefault()}
       onPointerDownCapture={onPanDown}
       onPointerMoveCapture={onPanMove}
       onPointerUpCapture={onPanUp}
@@ -232,6 +270,8 @@ function CanvasPane({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
         style={{ touchAction: 'none', cursor }}
       />
       {/* Task 10.1 RULE 4: the overlay shows the cursor, the path being drawn
@@ -271,6 +311,19 @@ function CanvasPane({
 // ── App ──────────────────────────────────────────────────────────────────
 
 type Status = 'loading' | 'ready' | 'error';
+
+/**
+ * **The gesture's name, in the designer's words** (Task 10.7 RULE 1) — what the
+ * event log says happened. Kept at module scope because it is a *vocabulary*
+ * table, not state: the recogniser speaks in `TouchAction`s, the log speaks in
+ * taps and swipes, and this is the only place the two meet.
+ */
+const GESTURE_LABEL: Record<TouchAction, string> = {
+  undo: 'two-finger tap',
+  redo: 'three-finger tap',
+  copyPaste: 'three-finger swipe down',
+  none: '',
+};
 
 /**
  * Task 10.0 note: this component takes no props. Both builds run *this* tree,
@@ -354,6 +407,21 @@ export default function App() {
   const [aiPhrasings, setAiPhrasings] = useState<string[]>([]);
   /** The engine's own summary — the grounding the panel *shows* (RULE 2). */
   const [aiSummary, setAiSummary] = useState<DocumentSummaryWire | null>(null);
+
+  // ── Task 10.6: Make Magic (Cmd+K) and Smart Components ────────────────────
+  /** The Cmd+K bar. `magicOpen` is the palette; `magicText` is the prompt. */
+  const [magicOpen, setMagicOpen] = useState(false);
+  const [magicText, setMagicText] = useState('');
+  /** The engine's own prose for the current selection — what a prompt acts on. */
+  const [selectionProse, setSelectionProse] = useState('');
+  /** The structural macros, as chips under the bar. */
+  const [macros, setMacros] = useState<StructuralMacroWire[]>([]);
+  /** The Smart Component inspector's state (props, role, headline). */
+  const [component, setComponent] = useState<ComponentViewWire | null>(null);
+  /** The designer's sentence from the last Magic run (RULE 4). */
+  const [magicReceipt, setMagicReceipt] = useState<string | null>(null);
+  /** Icon Studio's size list, as a text field: "16 32 48". */
+  const [iconSizes, setIconSizes] = useState('16 32 48');
   /** The two numbers a hover spring interpolates between (document units). */
   const [hoverOff, setHoverOff] = useState('200');
   const [hoverOn, setHoverOn] = useState('320');
@@ -378,6 +446,32 @@ export default function App() {
   const logRef = useRef<HTMLDivElement>(null);
   /** Where ⌘K/Ctrl+K puts the caret. */
   const aiPromptRef = useRef<HTMLInputElement>(null);
+
+  // ── Task 10.7: the "Procreate" layer ──────────────────────────────────
+  //
+  // Three pieces of state, each owned by the gesture that needs it:
+  // * `streamline` is the slider's number and nothing else — the filter is built
+  //   per stroke from it, so moving the slider mid-stroke cannot change the
+  //   shape of the stroke already under the hand.
+  // * `dropColor`/`dropPos` are the ColorDrop drag: the colour the well carries
+  //   and where the pointer is while it is carried. The drop itself is decided
+  //   on release, against the engine's hit test.
+  const [streamline, setStreamline] = useState(30);
+  const [dropColor, setDropColor] = useState('#e8622c');
+  const [dropPos, setDropPos] = useState<{ x: number; y: number } | null>(null);
+  /** **RULE 1**: the multi-touch recogniser. A ref, because it is the gesture's
+   *  state across events, not a value the UI renders. */
+  const touchRef = useRef<TouchRouter>(new TouchRouter());
+  /** **RULE 2**: the live stroke's filter, `null` between strokes. */
+  const streamlineRef = useRef<StreamLine | null>(null);
+  /** The Ctrl-click candidate (RULE 1's mouse half): armed on press, decided
+   *  on release — a Ctrl-*drag* is not a click. */
+  const modifierClickRef = useRef<{
+    action: TouchAction;
+    pointerId: number;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const appendLog = useCallback((kind: LogEntry['kind'], text: string) => {
     seq.current += 1;
@@ -823,6 +917,172 @@ export default function App() {
     appendLog('cmd', '→ redo');
     absorb(client, client.redo());
   }, [client, appendLog, absorb]);
+
+  /**
+   * **Copy / Paste** (Task 10.7 RULE 1): the three-finger swipe's command.
+   *
+   * The engine has no clipboard command, and it does not need one: its copy
+   * primitive is `DuplicateNode`, and a paste is a duplicate placed just above
+   * its source. So the gesture duplicates the selection — the designer's
+   * "copy/paste", done in one step, which is also what Procreate's Copy & Paste
+   * HUD produces on the canvas. The copies become the selection, so a second
+   * swipe duplicates the copies (the ordinary "paste again").
+   *
+   * With nothing selected the gesture does nothing and says so: an invisible
+   * failure is worse than no feature.
+   */
+  const runCopyPaste = useCallback(() => {
+    if (!client) return;
+    const ids = selection;
+    if (ids.length === 0) {
+      appendLog('info', '⇩ copy/paste · nothing is selected');
+      return;
+    }
+    const copies: string[] = [];
+    for (const id of ids) {
+      const command = duplicateNode(id);
+      const res = client.dispatch(command);
+      absorb(client, res);
+      if (res.status === 'error') {
+        appendLog('error', `✗ copy/paste · ${res.message}`);
+        return;
+      }
+      const newId = (command as { id?: string }).id;
+      if (newId) copies.push(newId);
+    }
+    if (copies.length > 0) {
+      setSelection(copies);
+      // The engine's idea of "this" follows the canvas selection, so a prompt
+      // typed after the swipe acts on the copies — the same sync the click path
+      // does, for the same reason.
+      const prose = client.setSelection(copies)?.prose;
+      if (prose) setSelectionProse(prose);
+    }
+    appendLog(
+      'cmd',
+      `⇩ copy/paste · duplicated ${copies.length} object${copies.length === 1 ? '' : 's'}`,
+    );
+  }, [client, selection, absorb, appendLog]);
+
+  /** **RULE 1's routing table**, in one place: what a recognised gesture means. */
+  const runTouchAction = useCallback(
+    (action: TouchAction) => {
+      if (action === 'undo') runUndo();
+      if (action === 'redo') runRedo();
+      if (action === 'copyPaste') runCopyPaste();
+    },
+    [runUndo, runRedo, runCopyPaste],
+  );
+
+  /**
+   * **The canvas's release** (RULE 1): where a tap and a modifier click are
+   * decided. Left and right gestures: a touch contact's decision is the
+   * recogniser's (`touch.ts`), a mouse click's is the modifier's
+   * (`modifierClick`), and neither needs to know about the other.
+   *
+   * The drawing gesture's own release is *not* here: while a stroke is live the
+   * window owns the pointer (see `drawGestureUp`), exactly as before.
+   */
+  const onCanvasUp = useCallback(
+    (e: ReactPointerEvent<HTMLCanvasElement>) => {
+      if (e.pointerType === 'touch') {
+        const decision = touchRef.current.up(
+          { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY },
+          performance.now(),
+        );
+        if (decision.swallow) e.preventDefault();
+        if (decision.action !== 'none') {
+          appendLog('info', `⇱ ${GESTURE_LABEL[decision.action]} → ${decision.action}`);
+          runTouchAction(decision.action);
+        }
+        return;
+      }
+      const candidate = modifierClickRef.current;
+      if (!candidate || candidate.pointerId !== e.pointerId) return;
+      modifierClickRef.current = null;
+      const dragged =
+        Math.hypot(e.clientX - candidate.x, e.clientY - candidate.y) >= DRAG_SLOP_PX;
+      const action = modifierClick({
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        button: e.button,
+        dragged,
+      });
+      if (action === 'none') return;
+      e.preventDefault();
+      if (action !== candidate.action) {
+        // The modifier set changed between press and release (Shift added, Ctrl
+        // let go): the *release* is what the designer meant, so re-read it and
+        // say which one ran.
+        appendLog('info', `⌨ ctrl-click → ${action}`);
+      }
+      runTouchAction(action);
+    },
+    [appendLog, runTouchAction],
+  );
+
+  /** A contact was lost: the recogniser forgets it and fires nothing. */
+  const onCanvasCancel = useCallback((e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === 'touch') {
+      touchRef.current.cancel({ pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY });
+    }
+    modifierClickRef.current = null;
+  }, []);
+
+  // ── Task 10.7 RULE 4: ColorDrop's drag ────────────────────────────────
+  //
+  // The well starts the drag; the *window* finishes it, for the same reason a
+  // stroke lives on the window: a drop that leaves the canvas column and comes
+  // back must still be the same drag.
+
+  const startColorDrop = useCallback((clientX: number, clientY: number) => {
+    setDropPos({ x: clientX, y: clientY });
+    appendLog('info', '◧ ColorDrop · drag onto a shape');
+  }, [appendLog]);
+
+  const finishColorDrop = useCallback(
+    (clientX: number, clientY: number) => {
+      setDropPos(null);
+      if (!client) return;
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect || clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+        appendLog('info', '◧ ColorDrop · released outside the canvas — nothing to fill');
+        return;
+      }
+      // **The rule's own tool**: the renderer's hit test, the same index a click
+      // uses. No UI-side region maths exists to go wrong.
+      const nodeId = client.pointerHit(clientX, clientY);
+      const plan = planColorDrop(nodeId, dropColor);
+      if (plan.kind === 'noop') {
+        appendLog('info', dropStatus(plan, null));
+        return;
+      }
+      const node = snapshot?.scene.nodes[plan.nodeId] ?? null;
+      const stack = appearanceStack(node);
+      if (!dropChangesStack(stack, plan.color)) {
+        appendLog('info', `◧ ColorDrop · ${node?.name ?? plan.nodeId} is already that colour`);
+        return;
+      }
+      runCommand('ColorDrop fill', setAppearances(plan.nodeId, stackToWire(stackWithColor(stack, plan.color))));
+      appendLog('cmd', dropStatus(plan, node?.name ?? null));
+    },
+    [client, dropColor, snapshot, appendLog, runCommand],
+  );
+
+  useEffect(() => {
+    if (!dropPos) return;
+    const move = (event: PointerEvent) => setDropPos({ x: event.clientX, y: event.clientY });
+    const up = (event: PointerEvent) => finishColorDrop(event.clientX, event.clientY);
+    const cancel = () => setDropPos(null);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+    };
+  }, [dropPos !== null, finishColorDrop]);
 
   const runFullReeval = useCallback(() => {
     if (!client) return;
@@ -1623,6 +1883,165 @@ export default function App() {
    * selection. The engine answers with anchors and handles in document space, and
    * the only thing this component adds is the camera.
    */
+  // ── Task 10.6: Smart Components + Make Magic ─────────────────────────────
+
+  /**
+   * Push the canvas selection into the engine and read back its prose.
+   *
+   * RULE 2 needs a "this": a prompt about the selection is only meaningful if
+   * the engine knows what is selected. The engine writes the sentence, so the
+   * bar and the AI prompt can never disagree about the subject.
+   */
+  const syncSelection = useCallback(
+    (c: VectraClient, ids: string[]) => {
+      const reply = c.setSelection(ids);
+      if (reply) setSelectionProse(reply.prose);
+      setComponent(c.componentView());
+    },
+    [],
+  );
+
+  /** Re-inspect the selection after anything that could change its role. */
+  const inspectSelection = useCallback(
+    (c: VectraClient) => {
+      setComponent(c.componentView());
+    },
+    [],
+  );
+
+  /**
+   * **Make Magic** (RULE 2): one prompt, structural commands, engine-validated,
+   * self-correcting — and answered with a sentence, never JSON (RULE 4).
+   */
+  const makeMagic = useCallback(
+    (prompt: string) => {
+      if (!client) return;
+      const text = prompt.trim();
+      if (!text) return;
+      appendLog('cmd', `→ magic ${JSON.stringify(text)}`);
+      const envelope = client.aiExecuteWithRetry(text);
+      setAiReceipt(envelope);
+      if (envelope.status === 'error') {
+        setAiText(text);
+        appendLog('error', `✗ magic: ${envelope.code} — ${envelope.message}`);
+        for (const correction of envelope.corrections) {
+          appendLog(
+            'info',
+            `magic correction ${correction.attempt}: ${correction.error}${
+              correction.note ? ` → ${correction.note}` : ''
+            }`,
+          );
+        }
+        refresh(client);
+        kick();
+        return;
+      }
+      for (const event of envelope.report.events) {
+        const line = formatEvent(event);
+        appendLog(line.kind, line.text);
+      }
+      const dirty = dirtyIdsOf(envelope.report.events);
+      if (dirty !== null) setLastDirty(dirty);
+      // The sentence, not the plan: the panel and the log both read it.
+      setMagicReceipt(envelope.prose);
+      appendLog('ok', envelope.prose || envelope.headline);
+      for (const correction of envelope.report.corrections) {
+        appendLog(
+          'info',
+          `magic self-corrected after attempt ${correction.attempt}: ${correction.error}`,
+        );
+      }
+      refresh(client);
+      inspectSelection(client);
+      kick();
+    },
+    [client, appendLog, refresh, inspectSelection, kick],
+  );
+
+  /** **Create Component** (RULE 1): group the selection behind a master. */
+  const makeComponent = useCallback(() => {
+    if (!client || selection.length === 0) return;
+    appendLog('cmd', `→ create component from ${selection.length} node(s)`);
+    const res = client.createComponent(selection);
+    absorb(client, res);
+    appendLog('ok', res.prose ?? 'component created');
+    inspectSelection(client);
+  }, [client, selection, appendLog, absorb, inspectSelection]);
+
+  /** **Icon Studio** (RULE 3): one instance per size, each on its artboard. */
+  const generateIconSet = useCallback(
+    (master: string) => {
+      if (!client) return;
+      const sizes = iconSizes
+        .split(/[,\s]+/)
+        .map((part) => Number.parseFloat(part))
+        .filter((size) => Number.isFinite(size) && size >= 4 && size <= 512);
+      if (sizes.length === 0) {
+        appendLog('error', '✗ icon set needs at least one size (e.g. 16 32 48)');
+        return;
+      }
+      appendLog('cmd', `→ icon set at ${sizes.join(', ')}`);
+      const res = client.iconSet(master, sizes);
+      absorb(client, res);
+      appendLog('ok', res.prose ?? 'icon set generated');
+      inspectSelection(client);
+    },
+    [client, iconSizes, appendLog, absorb, inspectSelection],
+  );
+
+  /** The prop sliders (RULE 1). A scaled prop edits its factor, engine-side. */
+  const setProp = useCallback(
+    (target: string, prop: ComponentPropWire, value: number | string) => {
+      if (!client) return;
+      const typed =
+        prop.ty === 'color'
+          ? ({ Color: { Literal: String(value) } } as const)
+          : ({ Float: { Literal: Number(value) } } as const);
+      const res = client.setComponentProp(target, prop.key, typed);
+      absorb(client, res);
+      inspectSelection(client);
+    },
+    [client, absorb, inspectSelection],
+  );
+
+  /** Place another instance of the inspected master. */
+  const placeInstance = useCallback(
+    (master: string) => {
+      if (!client) return;
+      const res = client.instantiateComponent(master);
+      absorb(client, res);
+      inspectSelection(client);
+    },
+    [client, absorb, inspectSelection],
+  );
+
+  // The macros are engine data, fetched once — like the procedural palette.
+  useEffect(() => {
+    if (!client) return;
+    setMacros(client.structuralMacros());
+  }, [client]);
+
+  // ⌘K / Ctrl-K opens the Make Magic bar; Escape closes it. Registered here
+  // rather than on the input, so it works wherever the focus is.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setMagicOpen(true);
+        return;
+      }
+      if (event.key === 'Escape') setMagicOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // The engine hears about the selection whenever it changes.
+  useEffect(() => {
+    if (!client) return;
+    syncSelection(client, selection);
+  }, [client, selection, syncSelection]);
+
   const refreshDraw = useCallback(
     (c: VectraClient) => {
       const session = sessionRef.current;
@@ -1742,6 +2161,7 @@ export default function App() {
       if (session.drawTool) {
         // A pen draft abandoned when the user picks another tool: the engine's
         // session is reset so a later click starts a fresh path.
+        streamlineRef.current = null;
         client.drawPointer(session.drawTool, 'cancel', 0, 0, false, false, performance.now());
       }
       if (state.activeHandle) client.drawEditCancel();
@@ -1771,6 +2191,42 @@ export default function App() {
   const onCanvasDown = useCallback(
     (e: ReactPointerEvent<HTMLCanvasElement>) => {
       if (!client) return;
+
+      // ── RULE 1 first: the invisible UI answers before the tools do ────
+      //
+      // A contact is offered to the recogniser before it can become a stroke.
+      // One finger draws, exactly as before; a second finger turns the gesture
+      // into the invisible UI, cancels the half-drawn stroke (never commits it)
+      // and takes the pointer away from the tools until the hand lifts.
+      if (e.pointerType === 'touch') {
+        const decision = touchRef.current.down(
+          { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY },
+          performance.now(),
+        );
+        if (decision.swallow) e.preventDefault();
+        if (decision.contacts >= 2) {
+          const session = sessionRef.current;
+          cancelGesture();
+          session.mutate({ status: `⇱ ${decision.contacts}-finger gesture…` });
+          syncDraw();
+          return;
+        }
+      } else {
+        // The mouse's half of RULE 1: Ctrl+Click is Undo, Ctrl+Shift+Click is
+        // Redo — armed here, decided on release, because a Ctrl-*drag* is not a
+        // click (`modifierClick` reads the travel).
+        const action = modifierClick({
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          button: e.button,
+        });
+        if (action !== 'none') {
+          e.preventDefault();
+          modifierClickRef.current = { action, pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+          return;
+        }
+      }
+
       const session = sessionRef.current;
       const point = docPoint(e.clientX, e.clientY);
       if (!point) return;
@@ -1779,10 +2235,18 @@ export default function App() {
       // ── the pen and the brush ────────────────────────────────────────
       if (tool) {
         e.preventDefault();
+        // **RULE 2**: this stroke's filter, built from the slider. "Never draw
+        // the point immediately": the engine is handed the filtered point from
+        // the very first sample, and the first sample of a one-point tap is its
+        // own average — so a click still lands exactly where the designer
+        // clicked, and the lag appears only once there is a direction to lag
+        // behind.
+        const filter = new StreamLine(streamlineAmount(streamline));
+        streamlineRef.current = filter;
         session.press({
           tool,
           pointerId: e.pointerId,
-          point,
+          point: filter.push(point),
           client: { x: e.clientX, y: e.clientY },
           alt: e.altKey,
           pressure: e.pressure > 0 && e.pressure !== 0.5 ? e.pressure : null,
@@ -1877,6 +2341,24 @@ export default function App() {
   /** The canvas: hover, or the live stroke between press and release. */
   const onDrawMove = useCallback(
     (e: ReactPointerEvent<HTMLCanvasElement>) => {
+      // ── RULE 1 again: a contact that *travels* is the recogniser's first ──
+      //
+      // Three fingers dragged down is the copy/paste swipe, and it fires the
+      // moment the threshold is crossed (a tap waits for the lift; a swipe
+      // cannot). From the second contact on, the pointer is not hovering and not
+      // drawing: the tools are told nothing until the hand lifts.
+      if (e.pointerType === 'touch') {
+        const decision = touchRef.current.move(
+          { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY },
+          performance.now(),
+        );
+        if (decision.swallow) e.preventDefault();
+        if (decision.action !== 'none') {
+          appendLog('info', `⇱ ${GESTURE_LABEL[decision.action]} → ${decision.action}`);
+          runTouchAction(decision.action);
+        }
+        if (decision.contacts >= 2) return;
+      }
       if (!client) return;
       const session = sessionRef.current;
       if (session.state.isDrawing && session.state.gesture) return; // the window owns it
@@ -1895,7 +2377,7 @@ export default function App() {
       }
       onCanvasMove(e);
     },
-    [client, docPoint, syncDraw, onCanvasMove],
+    [client, docPoint, syncDraw, onCanvasMove, appendLog, runTouchAction],
   );
 
   /**
@@ -1997,7 +2479,12 @@ export default function App() {
       const gesture = state.gesture;
       const tool = session.drawTool;
       if (!gesture || !tool) return;
-      session.extend(point, { x: e.clientX, y: e.clientY }, e.pressure > 0 && e.pressure !== 0.5 ? e.pressure : null);
+      // **RULE 2**: the point the engine sees is the *filtered* one — the raw
+      // client position still drives the slop test (a screen-space question),
+      // while the smoothing lives in document space, where the stroke does.
+      const filter = streamlineRef.current;
+      const sample = filter ? filter.push(point) : point;
+      session.extend(sample, { x: e.clientX, y: e.clientY }, e.pressure > 0 && e.pressure !== 0.5 ? e.pressure : null);
       session.mutate({ isAltPressed: e.altKey });
       const intent = moveIntent(session.state.gesture ?? gesture, performance.now());
       if (intent.call !== 'pointer') return;
@@ -2014,7 +2501,18 @@ export default function App() {
       syncDraw();
       armHold();
     },
-    [client, docPoint, appendLog, syncDraw, armHold, refresh, refreshDraw, kick],
+    [
+      client,
+      docPoint,
+      appendLog,
+      syncDraw,
+      armHold,
+      refresh,
+      refreshDraw,
+      kick,
+      cancelGesture,
+      streamline,
+    ],
   );
 
   /** The gesture's **release**: commit, or end the anchor edit. */
@@ -2031,7 +2529,26 @@ export default function App() {
       refreshDraw(client);
       return;
     }
-    const gesture = state.gesture;
+    // **RULE 2's tail.** The filter lags, so the hand's final position has to be
+    // handed over before the release or the stroke ends where the filter was,
+    // not where the hand stopped. For the brush it must *reach the engine* (the
+    // stroke is fitted from the engine's samples); for the pen the session is
+    // enough, because the pen's `up` reports the gesture's last point.
+    const filter = streamlineRef.current;
+    if (filter && state.gesture) {
+      const tail = filter.flush();
+      const last = tail[tail.length - 1];
+      const sample = state.gesture.samples[state.gesture.samples.length - 1];
+      if (last && sample) {
+        if (state.gesture.tool === 'brush') {
+          client.drawPointer('brush', 'move', last.x, last.y, false, false, performance.now());
+        }
+        session.extend(last, { x: sample.clientX, y: sample.clientY }, sample.pressure);
+      }
+    }
+    streamlineRef.current = null;
+
+    const gesture = sessionRef.current.state.gesture ?? state.gesture;
     const tool = session.drawTool;
     if (!gesture || !tool) return;
     if (state.committed) {
@@ -2277,6 +2794,16 @@ export default function App() {
             disabled={!ready}
             status={drawStatus}
           />
+          <DrawSettingsPanel
+            tool={draw.tool}
+            streamline={streamline}
+            onStreamline={setStreamline}
+            color={dropColor}
+            onColor={setDropColor}
+            onDropStart={startColorDrop}
+            dragging={dropPos !== null}
+            disabled={!ready}
+          />
           <CanvasPane
             canvasRef={canvasRef}
             onPointerDown={onCanvasDown}
@@ -2285,6 +2812,8 @@ export default function App() {
             onPanUp={onPanUp}
             onPointerMove={onDrawMove}
             onPointerLeave={onCanvasLeave}
+            onPointerUp={onCanvasUp}
+            onPointerCancel={onCanvasCancel}
             hasNodes={(snapshot?.scene.z_order.length ?? 0) > 0}
             status={canvas}
             frame={frame}
@@ -3272,14 +3801,20 @@ export default function App() {
               understands: {aiPhrasings.join(' · ')}
             </p>
           ) : null}
+          {ai.prose ? (
+            <p className="magic-prose" data-testid="ai-prose">
+              {ai.prose}
+            </p>
+          ) : null}
           {ai.plan.length ? (
+            /* RULE 4: the plan is described in words — "Add vertical constraint",
+               "Set width" — never as raw JSON. */
             <ol className="ai-plan" data-testid="ai-plan">
               {ai.plan.map((row) => (
-                <li key={row.index} title={row.json}>
+                <li key={row.index} title={row.label}>
                   <span className="ai-plan-index">{row.index}</span>
-                  <span className="ai-plan-tag">{row.tag}</span>
-                  <span className="ai-plan-target">{row.target}</span>
-                  <code className="ai-plan-json">{row.json}</code>
+                  <span className="ai-plan-tag">{row.label}</span>
+                  {row.target ? <span className="ai-plan-target">{row.target}</span> : null}
                 </li>
               ))}
             </ol>
@@ -3329,6 +3864,22 @@ export default function App() {
             </>
           ) : null}
         </section>
+
+        {/* ── Task 10.6 RULE 1: the Smart Component inspector ─────────────── */}
+        <ComponentPanel
+          component={component}
+          selectionCount={selection.length}
+          ready={ready}
+          // The probe is the client's; the sentence is the engine's own words.
+          engineIsOlder={Boolean(client?.engineIsOlder)}
+          staleSentence={VectraClient.STALE_ENGINE}
+          iconSizes={iconSizes}
+          onIconSizes={setIconSizes}
+          onCreate={makeComponent}
+          onPlaceInstance={placeInstance}
+          onGenerateIconSet={generateIconSet}
+          onSetProp={setProp}
+        />
 
         <section className="panel">
           <h2>
@@ -3407,6 +3958,28 @@ export default function App() {
           </div>
         </div>
       ) : null}
+
+      {/* ── Task 10.7 RULE 4: the colour in flight ────────────────────── */}
+      {dropPos && (
+        <div
+          className="colordrop-ghost"
+          data-testid="colordrop-ghost"
+          style={{ left: dropPos.x, top: dropPos.y, background: dropColor }}
+        />
+      )}
+
+      {/* ── Task 10.6 RULE 2 + RULE 4: Make Magic (⌘K) ──────────────────── */}
+      <MagicBar
+        open={magicOpen}
+        ready={ready}
+        text={magicText}
+        onText={setMagicText}
+        selectionProse={selectionProse}
+        macros={macros}
+        receipt={magicReceipt}
+        onRun={makeMagic}
+        onClose={() => setMagicOpen(false)}
+      />
     </div>
   );
 }

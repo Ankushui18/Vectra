@@ -308,6 +308,29 @@ pub enum Command {
         id: LayerId,
         locked: bool,
     },
+    /// **Alpha Lock** (Task 10.7 RULE 3a): constrain new artwork on this layer
+    /// to the layer's existing content.
+    ///
+    /// A flag like the eye and the padlock — one history entry, no
+    /// re-evaluation, no geometry touched — but a flag the *drawing boundary*
+    /// reads: while it is on, a committed stroke is intersected with the layer's
+    /// content before it is stored, so a designer cannot paint outside the lines
+    /// they already have.
+    SetLayerAlphaLocked {
+        id: LayerId,
+        alpha_locked: bool,
+    },
+    /// **Clipping Mask** (Task 10.7 RULE 3b): show this layer only where it
+    /// overlaps the layer below.
+    ///
+    /// This one *is* geometry: the scene pass reshapes the layer's nodes to
+    /// their intersection with the layer below, so the toggle reports the
+    /// affected nodes as updated (they must be re-sent to the renderer) while
+    /// still resolving no parameter.
+    SetLayerClippingMask {
+        id: LayerId,
+        clipping_mask: bool,
+    },
     /// Move a layer in the z-order. Its nodes travel with it — a layer is a unit
     /// in the draw order, which is what makes dragging one in the panel move
     /// everything on it.
@@ -388,6 +411,73 @@ pub enum Command {
     /// Make a layer current: the one `CreateNode` fills from now on.
     SetActiveLayer {
         id: LayerId,
+    },
+    /// **Create a Smart Component** (Task 10.6 RULE 1): a
+    /// [`crate::procedural::ProceduralKind::ComponentMaster`] whose members are
+    /// the given nodes, plus the bindings that make those members parametric.
+    ///
+    /// The members keep their identity — a component is a *view* of the artwork
+    /// plus a set of variable-backed slots, not a copy of it. Each prop's slots
+    /// are rebound to a variable the command creates (scalar props) or to a port
+    /// the master publishes (colour props), which is what makes "set a prop"
+    /// instant and local: the dependency graph already knows how to propagate a
+    /// variable to exactly the slots that read it.
+    ///
+    /// `props` may be empty, in which case [`crate::component::infer_props`]
+    /// decides them — the panel can also send an explicit list, because a
+    /// designer who renamed a prop expects the rename to stick.
+    CreateComponent {
+        id: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        members: Vec<NodeId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        props: Vec<crate::component::ComponentProp>,
+    },
+    /// **Place an instance** of a Smart Component (RULE 1): a
+    /// [`crate::procedural::ProceduralKind::Component`] node plus a group
+    /// holding its own clones, bound to its own variables.
+    ///
+    /// The clones are ordinary authored nodes, so they layer, hit-test and
+    /// export like anything else; nothing in the renderer has to know that
+    /// components exist.
+    InstantiateComponent {
+        id: NodeId,
+        master: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+    },
+    /// **Copy a node** (Task 10.6 RULE 2): the structural primitive behind "create
+    /// 4 colour variations".
+    ///
+    /// A copy, not a reference: duplicating is how a designer explores, and the
+    /// copies are ordinary nodes they can then edit, name and delete. Parameters
+    /// come across as they are — a duplicate of a `$base`-wide rectangle is
+    /// still `$base` wide, which is the *useful* default and the reason a
+    /// variation set stays a family.
+    DuplicateNode {
+        id: NodeId,
+        source: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+    },
+    /// **Set a prop on one instance** (RULE 1). Only that instance's variable
+    /// (or port) is written, so only its clones re-evaluate — the master and
+    /// every other instance are untouched.
+    SetComponentProp {
+        target: NodeId,
+        prop: String,
+        value: ParamValue,
+    },
+    /// Replace a component's prop list (used by the panel to add, remove or
+    /// rename props without recreating the component).
+    SetComponentSpec {
+        id: NodeId,
+        spec: crate::component::ComponentSpec,
     },
     /// A composite: apply children in order; the inverse is the reversed
     /// inverses. Used for one user action whose document effect is several
@@ -482,6 +572,18 @@ impl Command {
                 "Unlock layer"
             }
             .to_string(),
+            Self::SetLayerAlphaLocked { alpha_locked, .. } => if *alpha_locked {
+                "Lock alpha"
+            } else {
+                "Unlock alpha"
+            }
+            .to_string(),
+            Self::SetLayerClippingMask { clipping_mask, .. } => if *clipping_mask {
+                "Clip to layer below"
+            } else {
+                "Remove clipping mask"
+            }
+            .to_string(),
             Self::ReorderLayer { .. } => "Reorder layer".to_string(),
             Self::AssignNodeToLayer { .. } => "Move to layer".to_string(),
             Self::DetachNodeFromLayers { .. } => "Remove from layer".to_string(),
@@ -496,6 +598,18 @@ impl Command {
             Self::SetArtboardBackground { .. } => "Artboard background".to_string(),
             Self::SetActiveArtboard { .. } => "Switch artboard".to_string(),
             Self::SetActiveLayer { .. } => "Switch layer".to_string(),
+            Self::CreateComponent { name, members, .. } => format!(
+                "Create component \"{}\" from {} shape(s)",
+                name.clone().unwrap_or_else(|| "component".to_string()),
+                members.len()
+            ),
+            Self::InstantiateComponent { .. } => "Place component instance".to_string(),
+            Self::SetComponentProp { prop, .. } => format!("Set {prop}"),
+            Self::DuplicateNode { name, .. } => format!(
+                "Duplicate to \"{}\"",
+                name.clone().unwrap_or_else(|| "copy".to_string())
+            ),
+            Self::SetComponentSpec { .. } => "Edit component props".to_string(),
             Self::Batch { commands } => match commands.len() {
                 0 => "No-op".to_string(),
                 1 => commands[0].label(),
@@ -617,7 +731,19 @@ impl Command {
             Self::DeleteLayer { id } => vec![EngineEvent::LayersUpdated { ids: vec![*id] }],
             Self::RenameLayer { id, .. }
             | Self::SetLayerVisible { id, .. }
-            | Self::SetLayerLocked { id, .. } => {
+            | Self::SetLayerLocked { id, .. }
+            | Self::SetLayerAlphaLocked { id, .. } => {
+                vec![EngineEvent::LayersUpdated { ids: vec![*id] }]
+            }
+            // A clipping mask *reshapes* the layer's nodes, so those ids are
+            // reported as updated: the evaluator resolves no parameter (the
+            // nodes' own slots are untouched) but the scene pass rewrites their
+            // primitives, and the renderer has to hear about it.
+            // The affected nodes' ids are not available here (a command does not
+            // read the document), and they do not need to be: the scene pass
+            // reports the ids whose primitives it rewrote, and `settle` folds
+            // them into the `Dirty` event the renderer reads.
+            Self::SetLayerClippingMask { id, .. } => {
                 vec![EngineEvent::LayersUpdated { ids: vec![*id] }]
             }
             // Moving a layer, moving a node, or re-homing one all change the
@@ -661,6 +787,32 @@ impl Command {
                 EngineEvent::LayerOrderChanged,
             ],
             Self::SetActiveLayer { id } => vec![EngineEvent::LayersUpdated { ids: vec![*id] }],
+            // A component is a procedural node whose members are ordinary
+            // nodes: the UI hears about both, and the dependency graph dirties
+            // whatever the bindings touch.
+            Self::CreateComponent { id, members, .. } => vec![
+                EngineEvent::ProceduralUpdated { ids: vec![*id] },
+                EngineEvent::NodesUpdated {
+                    ids: members.clone(),
+                },
+                EngineEvent::VariablesUpdated { names: Vec::new() },
+            ],
+            Self::InstantiateComponent { id, .. } => vec![
+                EngineEvent::ProceduralUpdated { ids: vec![*id] },
+                EngineEvent::NodesUpdated { ids: vec![*id] },
+                EngineEvent::OrderChanged,
+            ],
+            Self::SetComponentProp { target, .. } => vec![
+                EngineEvent::ProceduralUpdated { ids: vec![*target] },
+                EngineEvent::NodesUpdated { ids: vec![*target] },
+            ],
+            Self::DuplicateNode { id, .. } => vec![
+                EngineEvent::NodesUpdated { ids: vec![*id] },
+                EngineEvent::OrderChanged,
+            ],
+            Self::SetComponentSpec { id, .. } => {
+                vec![EngineEvent::ProceduralUpdated { ids: vec![*id] }]
+            }
             Self::Batch { commands } => {
                 let mut events = Vec::new();
                 for cmd in commands {
@@ -1271,6 +1423,30 @@ impl Command {
                     locked: previous,
                 })
             }
+            Self::SetLayerAlphaLocked { id, alpha_locked } => {
+                let layer = doc
+                    .layers
+                    .get_mut(id)
+                    .ok_or(VectraError::LayerNotFound(*id))?;
+                let previous = layer.alpha_locked;
+                layer.alpha_locked = *alpha_locked;
+                Ok(Self::SetLayerAlphaLocked {
+                    id: *id,
+                    alpha_locked: previous,
+                })
+            }
+            Self::SetLayerClippingMask { id, clipping_mask } => {
+                let layer = doc
+                    .layers
+                    .get_mut(id)
+                    .ok_or(VectraError::LayerNotFound(*id))?;
+                let previous = layer.clipping_mask;
+                layer.clipping_mask = *clipping_mask;
+                Ok(Self::SetLayerClippingMask {
+                    id: *id,
+                    clipping_mask: previous,
+                })
+            }
             Self::ReorderLayer { id, index } => {
                 // One call, because a layer's position lives in two places: the
                 // registry the panel lists and the artboard stack the draw order
@@ -1474,6 +1650,401 @@ impl Command {
                 doc.active_layer = Some(*id);
                 Ok(Self::SetActiveLayer {
                     id: previous.unwrap_or(*id),
+                })
+            }
+            Self::DuplicateNode {
+                id,
+                source,
+                name,
+                index,
+            } => {
+                if doc.nodes.contains_key(id) {
+                    return Err(VectraError::NodeAlreadyExists(*id));
+                }
+                let mut copy = doc
+                    .nodes
+                    .get(source)
+                    .ok_or(VectraError::NodeNotFound(*source))?
+                    .clone();
+                copy.id = *id;
+                copy.name = name
+                    .clone()
+                    .unwrap_or_else(|| format!("{} copy", copy.name));
+                doc.insert_node(copy, *index)?;
+                Ok(Self::DeleteNode { id: *id })
+            }
+            // ── Smart Components (Task 10.6 RULE 1) ──────────────────────
+            Self::CreateComponent {
+                id,
+                name,
+                members,
+                props,
+            } => {
+                use crate::component::{
+                    bind_plan, color_default, infer_props, seed_operands, ComponentProp, PropType,
+                };
+
+                if doc.procedural.contains(*id) {
+                    return Err(VectraError::command(format!(
+                        "procedural node {id} already exists"
+                    )));
+                }
+                if doc.nodes.contains_key(id) {
+                    return Err(VectraError::command(format!("node {id} already exists")));
+                }
+                for member in members {
+                    if !doc.nodes.contains_key(member) {
+                        return Err(VectraError::NodeNotFound(*member));
+                    }
+                }
+                if members.is_empty() {
+                    return Err(VectraError::command(
+                        "a component needs at least one member node",
+                    ));
+                }
+
+                // Props: the caller's list, or the inferred four (RULE 1).
+                let props: Vec<ComponentProp> = if props.is_empty() {
+                    infer_props(doc, members)
+                } else {
+                    props.clone()
+                };
+                let prefix = crate::component::command_prefix(*id);
+                let plan = bind_plan(doc, *id, members, &prefix, &props, None);
+                let color = color_default(doc, members);
+
+                // Variables first (a scaled source names one), then the
+                // expressions, then the slots that read them.
+                let mut restore: Vec<Command> = Vec::new();
+                for (variable, value) in &plan.variables {
+                    let previous = doc.set_variable(variable.clone(), *value)?;
+                    restore.push(match previous {
+                        Some(previous) => Command::SetVariable {
+                            name: variable.clone(),
+                            value: previous,
+                        },
+                        None => Command::RemoveVariable {
+                            name: variable.clone(),
+                        },
+                    });
+                }
+                for (expression, source) in &plan.expressions {
+                    let previous = doc.define_expression(*expression, source.clone());
+                    restore.push(match previous {
+                        Some(previous) => Command::DefineExpression {
+                            id: *expression,
+                            source: previous,
+                        },
+                        None => Command::RemoveExpression { id: *expression },
+                    });
+                }
+                for write in &plan.writes {
+                    let member = members[write.member];
+                    let node = doc
+                        .nodes
+                        .get_mut(&member)
+                        .ok_or(VectraError::NodeNotFound(member))?;
+                    let previous = node.set_param(&write.property, write.value.clone())?;
+                    restore.push(Command::SetParameter {
+                        node_id: member,
+                        property: write.property.clone(),
+                        value: previous,
+                    });
+                }
+
+                // The spec must carry the *effective* variables: a colour prop
+                // has none, and a scaled prop is read through the scale prop.
+                let mut spec = plan.spec.clone();
+                spec.props = props;
+                let operands = seed_operands(&spec, color);
+                debug_assert!(spec.props.iter().all(|prop| prop.ty == PropType::Color
+                    || spec.variables.contains_key(&prop.key)
+                    || prop.law.is_scaled()));
+
+                let record = ProceduralNode {
+                    id: *id,
+                    name: name.clone().unwrap_or_else(|| "Component".to_string()),
+                    kind: crate::procedural::ProceduralKind::ComponentMaster {
+                        members: members.clone(),
+                        spec,
+                    },
+                    wires: Default::default(),
+                    operands,
+                    enabled: true,
+                    style: Default::default(),
+                };
+                record.validate(&doc.procedural)?;
+                doc.procedural.insert(record);
+
+                restore.reverse();
+                restore.push(Command::RemoveProceduralNode { id: *id });
+                Ok(Self::batch(restore))
+            }
+            Self::InstantiateComponent {
+                id,
+                master,
+                name,
+                index,
+            } => {
+                use crate::component::{
+                    bind_plan, color_default, scale_key, seed_operands, spec_of, ComponentProp,
+                };
+
+                let master_node = doc
+                    .procedural
+                    .get(*master)
+                    .ok_or_else(|| unknown_procedural(*master))?;
+                let master_members = match &master_node.kind {
+                    crate::procedural::ProceduralKind::ComponentMaster { members, .. } => {
+                        members.clone()
+                    }
+                    _ => {
+                        return Err(VectraError::command(format!(
+                            "{master} is not a component master"
+                        )))
+                    }
+                };
+                if doc.procedural.contains(*id) {
+                    return Err(VectraError::command(format!(
+                        "procedural node {id} already exists"
+                    )));
+                }
+                let base_name = name
+                    .clone()
+                    .unwrap_or_else(|| format!("{} instance", master_node.name));
+
+                // 1. The clones: ordinary authored nodes, in an ordinary group.
+                let mut restore: Vec<Command> = Vec::new();
+                let mut clones: Vec<NodeId> = Vec::new();
+                for member in &master_members {
+                    let clone_id = crate::ids::new_node_id();
+                    let mut clone = doc
+                        .nodes
+                        .get(member)
+                        .ok_or(VectraError::NodeNotFound(*member))?
+                        .clone();
+                    clone.id = clone_id;
+                    clone.name = format!("{} copy", clone.name);
+                    doc.insert_node(clone, None)?;
+                    clones.push(clone_id);
+                    restore.push(Command::DeleteNode { id: clone_id });
+                }
+                let group = crate::ids::new_node_id();
+                let group_node = Node::new(
+                    group,
+                    base_name.clone(),
+                    NodeKind::Group {
+                        children: clones.clone(),
+                    },
+                );
+                doc.insert_node(group_node, *index)?;
+                restore.push(Command::DeleteNode { id: group });
+
+                // 2. Bind the clones with a plan of their own: same props and
+                //    laws, fresh variables **and fresh expressions**, so this
+                //    instance is independent of the master and of every other
+                //    instance.
+                let master_spec = spec_of(doc, *master)
+                    .cloned()
+                    .ok_or_else(|| unknown_procedural(*master))?;
+                let props: Vec<ComponentProp> = master_spec
+                    .props
+                    .iter()
+                    .map(|prop| prop.for_new_owner())
+                    .collect();
+                let prefix = crate::component::instance_prefix(*id);
+                // The instance starts at the **master's** size, not at a fresh
+                // reading of its own clones: by the time the clones exist their
+                // geometry is expression-bound (`$size × factor`) and
+                // `design_size` reads literals, so the reading lands on its 1.0
+                // floor — which would place a 1×1 speck whose Size slider spans
+                // 0..4 instead of a copy of the artwork. The master's own
+                // variable is the number the designer sees on it.
+                let seed = scale_key(&master_spec.props)
+                    .and_then(|key| master_spec.variable(key))
+                    .and_then(|variable| doc.variables.get(variable).copied());
+                let plan = bind_plan(doc, *id, &clones, &prefix, &props, seed);
+                let color = color_default(doc, &master_members);
+
+                for (variable, value) in &plan.variables {
+                    let previous = doc.set_variable(variable.clone(), *value)?;
+                    restore.push(match previous {
+                        Some(previous) => Command::SetVariable {
+                            name: variable.clone(),
+                            value: previous,
+                        },
+                        None => Command::RemoveVariable {
+                            name: variable.clone(),
+                        },
+                    });
+                }
+                for (expression, source) in &plan.expressions {
+                    let previous = doc.define_expression(*expression, source.clone());
+                    restore.push(match previous {
+                        Some(previous) => Command::DefineExpression {
+                            id: *expression,
+                            source: previous,
+                        },
+                        None => Command::RemoveExpression { id: *expression },
+                    });
+                }
+                for write in &plan.writes {
+                    let clone = clones[write.member];
+                    let node = doc
+                        .nodes
+                        .get_mut(&clone)
+                        .ok_or(VectraError::NodeNotFound(clone))?;
+                    let previous = node.set_param(&write.property, write.value.clone())?;
+                    restore.push(Command::SetParameter {
+                        node_id: clone,
+                        property: write.property.clone(),
+                        value: previous,
+                    });
+                }
+
+                // 3. The instance record itself: its *own* spec, so
+                //    `SetComponentProp` writes this instance's variables and
+                //    re-weights this instance's expressions.
+                let mut spec = plan.spec.clone();
+                spec.props = props;
+                let operands = seed_operands(&spec, color);
+                let record = ProceduralNode {
+                    id: *id,
+                    name: base_name,
+                    kind: crate::procedural::ProceduralKind::Component {
+                        master: *master,
+                        group,
+                        spec,
+                    },
+                    wires: Default::default(),
+                    operands,
+                    enabled: true,
+                    style: Default::default(),
+                };
+                record.validate(&doc.procedural)?;
+                doc.procedural.insert(record);
+
+                restore.reverse();
+                restore.push(Command::RemoveProceduralNode { id: *id });
+                Ok(Self::batch(restore))
+            }
+            Self::SetComponentProp {
+                target,
+                prop,
+                value,
+            } => {
+                use crate::component::{members_of, spec_of, PropLaw, PropType};
+
+                let spec = spec_of(doc, *target)
+                    .cloned()
+                    .ok_or_else(|| VectraError::command(format!("{target} is not a component")))?;
+                let component_prop = spec.get(prop).cloned().ok_or_else(|| {
+                    VectraError::command(format!("component {target} has no prop `{prop}`"))
+                })?;
+                let key = component_prop.key.clone();
+                let _members = members_of(doc, *target);
+
+                let previous = match component_prop.ty {
+                    PropType::Scalar => {
+                        let literal = match &value {
+                            ParamValue::Float(Parameter::Literal(v)) => *v,
+                            _ => {
+                                return Err(VectraError::command(
+                                    "a scalar prop takes a literal number",
+                                ))
+                            }
+                        };
+                        match &component_prop.law {
+                            // A direct prop *is* its variable.
+                            PropLaw::Direct => {
+                                let variable = spec.variable(&key).cloned().ok_or_else(|| {
+                                    VectraError::command(format!(
+                                        "prop `{key}` has no variable to write"
+                                    ))
+                                })?;
+                                let previous = doc.set_variable(variable, literal)?;
+                                ParamValue::Float(Parameter::Literal(previous.unwrap_or(0.0)))
+                            }
+                            // A scaled prop is derived: the number typed is the
+                            // value at the *current* scale, so the factor is
+                            // what actually changes (RULE 3).
+                            PropLaw::Scaled { .. } => {
+                                let scale_key = component_prop
+                                    .law
+                                    .scale()
+                                    .map(str::to_string)
+                                    .unwrap_or_default();
+                                let scale_variable =
+                                    spec.variable(&scale_key).cloned().ok_or_else(|| {
+                                        VectraError::command(format!(
+                                            "prop `{key}` scales from `{scale_key}`, \
+                                             which has no variable"
+                                        ))
+                                    })?;
+                                let scale =
+                                    doc.variables.get(&scale_variable).copied().unwrap_or(0.0);
+                                let previous = component_prop.factor().unwrap_or(0.0) * scale;
+                                if scale.abs() > f64::EPSILON {
+                                    let source = crate::component::scale_source(
+                                        literal / scale,
+                                        &scale_variable,
+                                    );
+                                    for scaled in &component_prop.scaled {
+                                        doc.define_expression(scaled.expression, source.clone());
+                                    }
+                                }
+                                ParamValue::Float(Parameter::Literal(previous))
+                            }
+                        }
+                    }
+                    PropType::Color => {
+                        let literal = match &value {
+                            ParamValue::Color(Parameter::Literal(color)) => *color,
+                            _ => {
+                                return Err(VectraError::command(
+                                    "a colour prop takes a literal colour",
+                                ))
+                            }
+                        };
+                        let node = doc
+                            .procedural
+                            .get_mut(*target)
+                            .ok_or_else(|| unknown_procedural(*target))?;
+                        node.operands
+                            .insert(key.clone(), value.clone())
+                            .unwrap_or(ParamValue::Color(Parameter::Literal(literal)))
+                    }
+                };
+
+                // A colour prop's value *is* the port an instance publishes, so
+                // rewriting it is enough; a scalar prop that drives geometry
+                // reaches the document through the dependency graph.
+                Ok(Self::SetComponentProp {
+                    target: *target,
+                    prop: key,
+                    value: previous,
+                })
+            }
+            Self::SetComponentSpec { id, spec } => {
+                let node = doc
+                    .procedural
+                    .get(*id)
+                    .ok_or_else(|| unknown_procedural(*id))?;
+                let mut candidate = node.clone();
+                let previous = match &mut candidate.kind {
+                    crate::procedural::ProceduralKind::ComponentMaster {
+                        spec: current, ..
+                    }
+                    | crate::procedural::ProceduralKind::Component { spec: current, .. } => {
+                        std::mem::replace(current, spec.clone())
+                    }
+                    _ => return Err(VectraError::command(format!("{id} is not a component"))),
+                };
+                candidate.validate(&doc.procedural)?;
+                doc.procedural.insert(candidate);
+                Ok(Self::SetComponentSpec {
+                    id: *id,
+                    spec: previous,
                 })
             }
             Self::Batch { commands } => {
