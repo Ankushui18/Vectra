@@ -1,3 +1,6 @@
+@import "tailwindcss";
+@source "./";
+
 /* VECTRA remote — minimal dark console theme. No external assets. */
 
 :root {
@@ -15,7 +18,7 @@
   --canvas: #121212;      /* the canvas, and the canvas only */
   --panel: #1e1e1e;       /* every panel, bar and drawer */
   --hover: #252526;       /* the one hover/raised surface */
-  --border: #3e3e42;      /* every keyline */
+  --border: #333333;      /* every keyline */
   --text: #e0e0e0;        /* primary type */
   --muted: #a0a0a0;       /* secondary type, units, hints */
   --accent: #4f8cff;      /* selection — nothing else */
@@ -59,6 +62,67 @@ body {
      the reference tools, and 1.35 is the line-height they set them at. */
   line-height: 1.35;
   -webkit-font-smoothing: antialiased;
+}
+
+/* ── Task 14.0 RULE 5: Global button reset ──────────────────────────────
+   Every button in the app starts from a clean slate — no default browser
+   styling (grey backgrounds, system borders, system fonts). Each specific
+   button class (`.dock-btn`, `.top-btn`, `.hud-btn`, etc.) then layers its
+   own appearance on top. */
+button {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* ── Task 14.0: Premium transitions ──────────────────────────────────────
+   Every interactive surface fades in/out with a single, consistent easing.
+   No jank, no pop-in — the whole interface feels like one instrument. */
+button,
+input,
+select,
+[role='button'],
+[role='tab'],
+.tab,
+.dock-btn,
+.dock-entry,
+.hud-btn,
+.bar-seg,
+.side-tab,
+.drawer-tab {
+  transition: all 0.15s ease-in-out;
+}
+
+/* ── Task 14.0: Custom thin dark scrollbars ──────────────────────────────
+   Every panel uses these. No default browser scrollbars visible. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333333;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #444444;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #333333 transparent;
 }
 
 /* (`.app` is styled at the end of this file, with the rest of the Task 13.0
@@ -208,67 +272,110 @@ body {
  * renderer opens with (`Camera::fit(800, 600)`), so the CSS grid overlay below
  * lines up with document units exactly. */
 .preview {
-  width: 100%;
-  height: auto;
-  aspect-ratio: 800 / 600;
-  border-radius: 6px;
-  border: 1px solid var(--border);
   display: block;
   background: var(--canvas);
+  border-radius: 0;
+  border: none;
 }
 
 .canvas-wrap {
   position: relative;
+  width: 100%;
+  height: 100%;
   line-height: 0;
+  /* Task 14.1: the canvas-wrap fills the stage. All pointer events pass
+     through to the canvas — the overlays are pointer-events: none. */
+  /* Task 14.0 RULE 3: the artboard floats in the void. The shadow is on the
+     canvas element — the one surface that looks like paper — so the artwork
+     reads as a distinct piece floating in the deep charcoal. */
+  perspective: 1000px;
 }
 
-/* A 50-document-unit grid, as a percentage of the fixed 800×600 window. It is
- * decoration: the renderer neither knows nor draws it. Phase 2's pan/zoom moves
- * it into the shader, where it can follow the camera. */
+.canvas-wrap .preview {
+  /* Task 14.1: the canvas fills the entire viewport. No aspect-ratio
+     constraint — the engine's camera handles the document-to-screen mapping. */
+  width: 100%;
+  height: 100%;
+  /* Task 14.0 RULE 3: hardware-accelerated compositing for smooth zoom/pan.
+     The artboard floats like paper in the void — the shadow sells it. */
+  will-change: transform;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  transition: box-shadow 0.3s ease-in-out;
+}
+
+/* Task 14.0: A subtle dot grid, only visible when zoomed in beyond 100%.
+   At 100% or below the canvas is the deep void (#121212) — the dots emerge as
+   the designer zooms in to work on detail, never as a permanent developer grid.
+   The dots are #1a1a1a on #121212 — barely visible, like the paper texture of a
+   premium sketchbook. */
 .canvas-grid {
   position: absolute;
   inset: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   pointer-events: none;
-  background-image:
-    repeating-linear-gradient(
-      to right,
-      rgba(120, 160, 220, 0.09) 0 1px,
-      transparent 1px 100%
-    ),
-    repeating-linear-gradient(
-      to bottom,
-      rgba(120, 160, 220, 0.09) 0 1px,
-      transparent 1px 100%
-    );
+  opacity: 0;
+  transition: opacity 0.25s ease-in-out;
+  background-image: radial-gradient(circle, #1a1a1a 0.7px, transparent 0.7px);
   background-size: 6.25% 8.3333%;
 }
 
-.canvas-hint,
-.canvas-banner {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 14px;
-  line-height: 1.4;
-  border-radius: 6px;
-  pointer-events: none;
-  text-align: center;
+/* Only show the grid when zoomed past 100% — the class is toggled by App.tsx. */
+.canvas-grid.canvas-grid--visible {
+  opacity: 1;
 }
 
+.canvas-hint,
 .canvas-hint {
   top: 50%;
   margin-top: -0.7em;
-  color: var(--muted);
+  color: rgba(160, 160, 160, 0.45);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  /* Task 14.0: subtle entrance — the hint breathes in, never pops. */
+  animation: hint-fade-in 600ms ease-out;
 }
 
+@keyframes hint-fade-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* Task 14.1: the WebGPU error is a small, non-intrusive toast — not a red
+   banner that breaks the layout. It sits bottom-left, well above the
+   floating bottom bar. */
 .canvas-banner {
-  top: 12px;
-  max-width: 80%;
-  padding: 8px 12px;
-  background: rgba(120, 30, 30, 0.85);
-  border: 1px solid rgba(255, 120, 120, 0.4);
-  color: #ffe8e8;
+  position: absolute;
+  left: 16px;
+  bottom: 80px;
+  top: auto;
+  max-width: 320px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  animation: toast-in 300ms ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .canvas-frame {
@@ -450,22 +557,28 @@ body {
   margin-bottom: 8px;
 }
 
-button {
+/* Task 14.0: the generic button rule is scoped to `.btn-row` context.
+   All other buttons (dock, HUD, top bar, side panel) have their own specific
+   classes. This prevents default-browser-button styling from leaking through. */
+.btn-row button {
   flex: 1;
+  background: var(--hover);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: var(--font);
+}
+
+.btn-row button:hover:not(:disabled) {
   background: var(--accent);
   color: #fff;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 13px;
-  cursor: pointer;
+  border-color: var(--accent);
 }
 
-button:hover:not(:disabled) {
-  filter: brightness(1.1);
-}
-
-button:disabled {
+.btn-row button:disabled {
   opacity: 0.4;
   cursor: default;
 }
@@ -1327,14 +1440,16 @@ select {
   opacity: 0.7;
 }
 
+/* Task 14.0: draw tool handles use the accent color for consistency with
+   the selection ring — no legacy blue-grey. */
 .ov-point {
-  fill: #0a0d12;
-  stroke: #d7e3f4;
+  fill: var(--canvas);
+  stroke: var(--accent);
   stroke-width: 1.2;
 }
 /* An anchor of a committed path… */
 .ov-anchor {
-  fill: #d7e3f4;
+  fill: var(--accent);
 }
 /* …an anchor the white arrow owns. */
 .ov-anchor.ov-selected {
@@ -1568,7 +1683,7 @@ select {
 .icon {
   background: none;
   border: none;
-  color: #9fb4cd;
+  color: var(--muted);
   cursor: pointer;
   font-size: 11px;
   line-height: 1;
@@ -1577,13 +1692,13 @@ select {
 }
 
 .icon:hover:not(:disabled) {
-  background: rgba(215, 227, 244, 0.12);
+  background: var(--hover);
   color: var(--text);
 }
 
 .icon.on {
-  background: rgba(122, 162, 216, 0.3);
-  color: var(--text);
+  background: var(--hover);
+  color: var(--accent);
 }
 
 .icon.danger:hover:not(:disabled) {
@@ -2087,49 +2202,60 @@ select {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   **Task 13.0 — the artist-first shell.**
+   **Task 14.1 — the full-viewport canvas with floating UI.**
 
-   RULE 5's palette is the `:root` block at the top of this file; one palette,
-   one accent (`--accent` is *selection*, nothing else), one hover surface, one
-   keyline. Everything below is laid out in that vocabulary and nowhere else —
-   a hard-coded hex in this section would be the first crack in the theme.
+   The canvas is the BASE LAYER filling the entire viewport. Every UI element
+   (top bar, left dock, right panel, bottom bar, HUD) floats ABOVE the canvas
+   with position: absolute. The canvas receives all pointer events by default;
+   the floating panels have their own pointer-events and never block the canvas
+   because they are strictly bounded (they don't overlap the drawing area).
 
-   The layout is deliberately four fixed edges and one flexible middle:
+       ┌─────────────────────────────────────────────────────────────────┐
+       │                     .app (full viewport)                        │
+       │  ┌──────────────────── .stage (absolute inset:0) ─────────────┐ │
+       │  │                                                            │ │
+       │  │              canvas fills the entire stage                 │ │
+       │  │                                                            │ │
+       │  │  ┌dock┐                                  ┌panel┐          │ │
+       │  │  │    │                                  │     │          │ │
+       │  │  └────┘                                  └─────┘          │ │
+       │  │                                                            │ │
+       │  │               ┌──── bottom bar ────┐                      │ │
+       │  │               └────────────────────┘                      │ │
+       │  └────────────────────────────────────────────────────────────┘ │
+       │         ┌──── top bar (centered) ────┐                         │
+       └─────────┴────────────────────────────┴─────────────────────────┘
 
-       ┌───────────────────────────── top bar ─────────────────────────────┐
-       │ dock │            stage (the canvas)            │   side panel    │
-       └────────────────────────── bottom bar ─────────────────────────────┘
-
-   Focus mode (RULE 3) removes all four edges and lets the stage take the
-   window; the edge reveal brings them back as overlays. Nothing reflows the
-   document, so a designer in the middle of a stroke never sees the artwork
-   jump.
+   Focus mode (RULE 3) hides all floating chrome; the edge reveal brings it
+   back. Nothing reflows the document, so the canvas never jumps.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/* Task 14.1: the app is a full-viewport container. Everything inside is
+   either the base-layer stage or an absolute-positioned floating UI element. */
 .app {
+  position: relative;
+  width: 100%;
   height: 100vh;
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
   background: var(--canvas);
 }
 
-/* The one scrolling, growing region: the stage and the two side rails. */
+/* The workspace wrapper is now a pass-through — it no longer owns layout. */
 .workspace {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  min-width: 0;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
+/* Task 14.1: the stage fills the entire viewport as the base layer.
+   The canvas lives here and receives all pointer events. */
 .stage {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
   background: var(--canvas);
-  display: flex;
-  flex-direction: column;
+  overflow: hidden;
+  /* The stage is the drawing surface — it receives pointer events. */
+  pointer-events: auto;
 }
 
 /* The status line is the stage's only permanent text: what the gesture in hand
@@ -2141,15 +2267,16 @@ select {
   bottom: 10px;
   font-size: 11px;
   color: var(--muted);
-  background: color-mix(in srgb, var(--canvas) 78%, transparent);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px 8px;
+  border-radius: 8px;
+  padding: 4px 10px;
   pointer-events: none;
   max-width: calc(100% - 24px);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  backdrop-filter: blur(8px);
 }
 
 .status-line .hold-note {
@@ -2169,43 +2296,44 @@ select {
 
 /* ── The top bar ──────────────────────────────────────────────────────── */
 
+/* Task 14.2: minimal Procreate-style top bar. */
 .top-bar {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 40px;
-  flex: 0 0 auto;
-  padding: 0 10px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
+  gap: 6px;
+  height: 44px;
+  padding: 0 12px;
+  background: rgba(30, 30, 30, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  white-space: nowrap;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding-right: 6px;
+  padding-right: 4px;
   user-select: none;
 }
 
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   background: var(--accent);
   color: #0b0b0b;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   line-height: 1;
-}
-
-.brand-name {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.18em;
-  color: var(--text);
 }
 
 /* The flexible gap: file and artboard on the left, engine state on the right,
@@ -2222,25 +2350,30 @@ select {
 .top-btn {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
 .top-btn:hover:not(:disabled) {
-  background: var(--hover);
+  background: rgba(255, 255, 255, 0.1);
   color: var(--text);
 }
 
+.top-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 .top-btn[aria-pressed='true'] {
-  background: var(--hover);
-  border-color: var(--border);
-  color: var(--accent);
+  background: var(--accent);
+  color: #fff;
 }
 
 /* The engine's liveness: one dot, three states. Its *words* are in `title`, so
@@ -2280,18 +2413,25 @@ select {
   white-space: nowrap;
 }
 
-/* ── RULE 1: the left dock ────────────────────────────────────────────── */
+/* ── RULE 1: the left dock (Task 14.1 — floating pill, absolute) ──────── */
 
 .dock {
-  flex: 0 0 auto;
-  width: 46px;
+  position: absolute;
+  left: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 10;
+  width: 48px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 8px 0;
+  gap: 2px;
+  padding: 6px 0;
   background: var(--panel);
-  border-right: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  will-change: transform;
 }
 
 .dock-group {
@@ -2301,11 +2441,11 @@ select {
 .dock-btn {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -2339,18 +2479,31 @@ select {
    it never covers the rail the hand is on. */
 .dock-flyout {
   position: absolute;
-  left: calc(100% + 6px);
+  left: calc(100% + 8px);
   top: -4px;
   z-index: 30;
-  min-width: 176px;
+  min-width: 180px;
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 5px;
+  padding: 6px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 28px rgb(0 0 0 / 55%);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 60%), 0 2px 8px rgb(0 0 0 / 40%);
+  backdrop-filter: blur(12px);
+  animation: flyout-enter 100ms ease-out;
+}
+
+@keyframes flyout-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 .dock-flyout-title {
@@ -2401,14 +2554,22 @@ select {
 
 /* ── RULE 1: the right panel ──────────────────────────────────────────── */
 
+/* Task 14.1 RULE 2: the right panel floats as an absolute-positioned card. */
 .side-panel {
-  flex: 0 0 auto;
+  position: absolute;
+  right: 20px;
+  top: 60px;
+  bottom: 80px;
+  z-index: 10;
   width: 272px;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--panel);
-  border-left: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
 }
 
 .side-panel.collapsed {
@@ -2722,12 +2883,96 @@ select {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  padding: 4px 5px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
   border: 1px solid var(--border);
-  border-radius: 9px;
-  box-shadow: 0 8px 22px rgb(0 0 0 / 50%);
-  backdrop-filter: blur(6px);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 4px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+  /* Task 14.0 RULE 4: smooth entrance when selection changes. */
+  animation: hud-enter 120ms ease-out;
+}
+
+@keyframes hud-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Task 14.0 RULE 4: the quick-edit well — fill, stroke, width, inline. */
+.hud-well {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 2px;
+}
+
+.hud-well-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 3px;
+  flex: 0 0 auto;
+}
+
+.hud-color {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1.5px solid var(--border);
+  overflow: hidden;
+}
+
+.hud-color:hover {
+  border-color: var(--text);
+}
+
+.hud-color-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+}
+
+.hud-color input[type='color'] {
+  position: absolute;
+  inset: -4px;
+  width: calc(100% + 8px);
+  height: calc(100% + 8px);
+  opacity: 0;
+  cursor: pointer;
+  border: none;
+}
+
+.hud-width {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.hud-width input[type='range'] {
+  width: 52px;
+  height: 3px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.hud-width-value {
+  min-width: 18px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text);
+  text-align: right;
 }
 
 .hud-btn {
@@ -2757,21 +3002,37 @@ select {
 .hud-more {
   border-left: 1px solid var(--border);
   border-radius: 0 6px 6px 0;
+  margin-left: 3px;
+  padding-left: 3px;
 }
 
 /* ── RULE 1: the dynamic bottom bar ───────────────────────────────────── */
 
+/* Task 14.1: the bottom bar floats centered above the canvas. */
 .bottom-bar {
-  flex: 0 0 auto;
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 40px;
+  gap: 8px;
+  height: 36px;
   padding: 0 12px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
+  background: rgba(30, 30, 30, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  max-width: calc(100vw - 120px);
   overflow-x: auto;
   scrollbar-width: none;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+
+.bottom-bar:hover {
+  opacity: 1;
 }
 
 .bottom-bar::-webkit-scrollbar {
@@ -2942,31 +3203,33 @@ select {
 }
 
 .app.focus-peek .top-bar {
-  top: 0;
-  left: 0;
-  right: 0;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
 }
 
 .app.focus-peek .bottom-bar {
-  bottom: 0;
-  left: 0;
-  right: 0;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
 }
 
 .app.focus-peek .dock {
-  left: 0;
-  top: 24px;
-  bottom: 24px;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  margin: 0;
   flex-direction: column;
-  border-radius: 0 10px 10px 0;
 }
 
 .app.focus-peek .side-panel {
-  right: 0;
-  top: 24px;
-  bottom: 24px;
+  right: 8px;
+  top: 60px;
+  bottom: 60px;
+  margin: 0;
   flex-direction: column;
-  border-radius: 10px 0 0 10px;
 }
 
 @keyframes focus-reveal {
@@ -3036,17 +3299,19 @@ select {
 
 /* ── The studio drawer ────────────────────────────────────────────────── */
 
+/* Task 14.1: the drawer floats over the canvas, inset from the edges. */
 .studio-drawer {
   position: fixed;
-  right: 0;
-  top: 40px;
-  bottom: 40px;
+  right: 20px;
+  top: 60px;
+  bottom: 80px;
   z-index: 35;
   width: min(420px, 46vw);
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-left: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 12px;
   box-shadow: -14px 0 34px rgb(0 0 0 / 50%);
   animation: drawer-in 140ms ease-out;
 }

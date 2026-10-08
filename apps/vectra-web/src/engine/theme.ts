@@ -47,7 +47,7 @@ export const THEME = {
   canvas: '#121212',
   panel: '#1e1e1e',
   hover: '#252526',
-  border: '#3e3e42',
+  border: '#333333',
   text: '#e0e0e0',
   textDim: '#a0a0a0',
   /** The one accent, used for selection and nothing else. */
