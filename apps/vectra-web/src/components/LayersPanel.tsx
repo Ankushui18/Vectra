@@ -33,6 +33,8 @@
 
 import { useState } from 'react';
 import type { DragEvent } from 'react';
+import { Boxes, ChevronRight, Layers, Plus } from 'lucide-react';
+import LayerRowView from './LayerRow';
 import {
   createLayer,
   deleteLayer,
@@ -94,17 +96,21 @@ export function LayersPanel({
   if (collapsed) {
     return (
       <section className="panel layers-panel collapsed" data-testid="layers-panel">
-        <h2>
+        <header className="panel-head">
           <button
+            type="button"
             className="panel-toggle"
             data-testid="layers-toggle"
             onClick={() => setCollapsed(false)}
             title="Show layers"
+            aria-label="Show the layers panel"
           >
-            ▸
+            <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />
           </button>
-          Layers <span className="sub">{layers.length}</span>
-        </h2>
+          <Layers size={15} strokeWidth={1.75} aria-hidden="true" />
+          <h2>Layers</h2>
+          <span className="sub">{layers.length}</span>
+        </header>
       </section>
     );
   }
@@ -187,52 +193,57 @@ export function LayersPanel({
 
   return (
     <section className="panel layers-panel" data-testid="layers-panel">
-      <h2>
+      <header className="panel-head">
         <button
+          type="button"
           className="panel-toggle"
           data-testid="layers-toggle"
           onClick={() => setCollapsed(true)}
           title="Collapse layers"
+          aria-label="Collapse the layers panel"
         >
-          ▾
+          <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />
         </button>
-        Layers
-        <span className="sub">
-          {layers.length} {layers.length === 1 ? 'layer' : 'layers'} · back → front reading
-          top-down
-        </span>
+        <Layers size={15} strokeWidth={1.75} aria-hidden="true" />
+        <h2>Layers</h2>
+        <span className="sub">{layers.length}</span>
+        <span className="panel-head-spacer" />
         <button
-          className="mini"
+          type="button"
+          className="icon"
           data-testid="add-layer"
           disabled={disabled}
           title="New layer"
+          aria-label="New layer"
           onClick={() => onCommand('Create layer', createLayer(`Layer ${layers.length + 1}`))}
         >
-          +
+          <Plus size={15} strokeWidth={2} aria-hidden="true" />
         </button>
         {onGroupSelection && (
           <button
-            className="mini"
+            type="button"
+            className="icon"
             data-testid="group-selection"
             disabled={disabled || (selection?.length ?? 0) === 0}
             title={
               (selection?.length ?? 0) === 0
-                ? 'Select one or more nodes to group them'
-                : `Group ${selection?.length} selected node${(selection?.length ?? 0) === 1 ? '' : 's'}`
+                ? 'Select one or more objects to group them'
+                : `Group ${selection?.length} selected object${
+                    (selection?.length ?? 0) === 1 ? '' : 's'
+                  }`
             }
             aria-label="Group the selection"
             onClick={() => onGroupSelection()}
           >
-            ▣
+            <Boxes size={15} strokeWidth={1.75} aria-hidden="true" />
           </button>
         )}
-      </h2>
+      </header>
 
       {layers.length === 0 && (
         <p className="hint" data-testid="layers-empty">
-          No layers yet. A new document gets one the moment artwork lands in it — or press
-          <b> +</b> to make one now. Every node belongs to a layer, and an unassigned node still
-          draws (that is how a document made before layers existed keeps working).
+          Nothing here yet. A new document gets its first layer the moment artwork lands in
+          it — or press <b>+</b> to make one now.
         </p>
       )}
 
@@ -240,28 +251,32 @@ export function LayersPanel({
         {rows.map((row) => {
           const layer = layers.find((candidate) => candidate.id === row.layerId);
           const childCount = layer?.children.length ?? 0;
-          const isRenaming = renaming === row.id;
+          const isLayer = row.kind === 'layer';
           return (
-            <li
+            <LayerRowView
               key={`${row.kind}-${row.id}`}
-              className={[
-                'layer-row',
-                `layer-${row.kind}`,
-                row.active ? 'active' : '',
-                row.visible ? '' : 'hidden',
-                row.locked ? 'locked' : '',
-                dropTarget === row.id ? 'drop-target' : '',
-                pendingNode ? 'assigning' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              style={{ paddingLeft: 6 + row.depth * 16 }}
-              data-testid={`layer-row-${row.id}`}
-              // Every row is draggable: layers reorder among themselves, nodes
-              // reparent into a group or out of one (Task 10.4 RULE 1).
-              draggable={!disabled}
+              row={row}
+              expanded={expanded.has(row.id)}
+              childCount={childCount}
+              renaming={renaming === row.id}
+              draftName={draftName}
+              dropTarget={dropTarget === row.id}
+              assigning={Boolean(pendingNode)}
+              disabled={disabled}
+              onToggleExpanded={() => onToggleExpanded(row.id)}
+              onStartRename={() => startRename(row)}
+              onDraftName={setDraftName}
+              onCommitRename={commitRename}
+              onCancelRename={() => setRenaming(null)}
+              onSelect={() => {
+                if (!isLayer) return;
+                const layerRow = layers.find((candidate) => candidate.id === row.id);
+                if (layerRow && !layerRow.active) {
+                  onCommand('Active layer', setActiveLayer(row.id));
+                }
+              }}
               onDragStart={() => {
-                setDragLayer(row.kind === 'layer' ? row.id : null);
+                setDragLayer(isLayer ? row.id : null);
                 setDragRow({ id: row.id, kind: row.kind });
               }}
               onDragEnd={() => {
@@ -276,14 +291,14 @@ export function LayersPanel({
               }}
               onDragLeave={() => setDropTarget(null)}
               onDrop={(event) => {
-                if (row.kind === 'layer' && dragLayer) {
+                if (isLayer && dragLayer) {
                   onDropLayer(row.id, event);
                 } else if (dragRow?.kind === 'node') {
                   onDropNode(
                     { id: row.id, kind: row.kind, canOpen: row.canOpen, layerId: row.layerId },
                     event,
                   );
-                } else if (row.kind === 'node' && onAssignNode) {
+                } else if (!isLayer && onAssignNode) {
                   // The row's *own* layer, not "the layer above it": a node
                   // nested inside a group that lives in another layer is listed
                   // with the layer the engine says holds it, and dropping onto
@@ -292,192 +307,39 @@ export function LayersPanel({
                   onAssignNode(row.layerId);
                 }
               }}
-              onClick={() => {
-                if (row.kind === 'layer') {
-                  const layerRow = layers.find((candidate) => candidate.id === row.id);
-                  if (layerRow && !layerRow.active) {
-                    onCommand('Active layer', setActiveLayer(row.id));
-                  }
-                }
-              }}
-            >
-              {(row.kind === 'layer' || row.canOpen) && (
-                <button
-                  className="disclose"
-                  data-testid={
-                    row.kind === 'layer' ? `layer-expand-${row.id}` : `group-expand-${row.id}`
-                  }
-                  disabled={row.kind === 'layer' ? childCount === 0 : !row.canOpen}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onToggleExpanded(row.id);
-                  }}
-                  title={
-                    expanded.has(row.id)
-                      ? `Collapse ${row.depth === 0 ? 'layer' : 'group'} ${row.name}`
-                      : `Expand ${row.depth === 0 ? 'layer' : 'group'} ${row.name}`
-                  }
-                  aria-label={`${expanded.has(row.id) ? 'Collapse' : 'Expand'} ${row.name}`}
-                  aria-expanded={expanded.has(row.id)}
-                >
-                  {expanded.has(row.id) ? '▾' : row.kind === 'layer' && childCount === 0 ? '·' : '▸'}
-                </button>
-              )}
-              {row.kind === 'node' && <span className="node-dot">{row.isGroup ? '▣' : '◆'}</span>}
-
-              {isRenaming ? (
-                <input
-                  className="rename"
-                  autoFocus
-                  value={draftName}
-                  onChange={(event) => setDraftName(event.target.value)}
-                  onBlur={commitRename}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') commitRename();
-                    if (event.key === 'Escape') setRenaming(null);
-                  }}
-                />
-              ) : (
-                <span className="layer-name" onDoubleClick={() => startRename(row)}>
-                  {row.name}
-                </span>
-              )}
-
-              {row.kind === 'layer' && row.active && (
-                <span className="chip chip-active" title="New artwork lands here">
-                  active
-                </span>
-              )}
-              {row.kind === 'node' && row.ownVisible === false && (
-                <span className="chip" title="Hidden by the node's own eye">
-                  self-hidden
-                </span>
-              )}
-
-              <span className="layer-actions">
-                {row.kind === 'layer' ? (
-                  <>
-                    <button
-                      className="icon"
-                      data-testid={`layer-eye-${row.id}`}
-                      disabled={disabled}
-                      title={row.visible ? 'Hide layer' : 'Show layer'}
-                      aria-label={`${row.visible ? 'Hide' : 'Show'} ${row.kind} ${row.name}`}
-                      aria-pressed={!row.visible}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onCommand(
-                          row.visible ? 'Hide layer' : 'Show layer',
-                          setLayerVisible(row.id, !row.visible),
-                        );
-                      }}
-                    >
-                      {row.visible ? '👁' : '⃠'}
-                    </button>
-                    <button
-                      className="icon"
-                      data-testid={`layer-lock-${row.id}`}
-                      disabled={disabled}
-                      title={row.locked ? 'Unlock layer' : 'Lock layer'}
-                      aria-label={`${row.locked ? 'Unlock' : 'Lock'} ${row.kind} ${row.name}`}
-                      aria-pressed={row.locked}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onCommand(
-                          row.locked ? 'Unlock layer' : 'Lock layer',
-                          setLayerLocked(row.id, !row.locked),
-                        );
-                      }}
-                    >
-                      {row.locked ? '🔒' : '🔓'}
-                    </button>
-                    <button
-                      className="icon"
-                      data-testid={`layer-alpha-${row.id}`}
-                      disabled={disabled}
-                      title={
-                        row.alphaLocked
-                          ? 'Unlock alpha — new strokes may leave the layer\'s artwork'
-                          : 'Lock alpha — new strokes stay inside what this layer already holds'
-                      }
-                      aria-label={`${row.alphaLocked ? 'Unlock' : 'Lock'} alpha of layer ${row.name}`}
-                      aria-pressed={row.alphaLocked === true}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onCommand(
-                          row.alphaLocked ? 'Unlock alpha' : 'Lock alpha',
-                          setLayerAlphaLocked(row.id, !row.alphaLocked),
-                        );
-                      }}
-                    >
-                      {row.alphaLocked ? 'α' : 'a'}
-                    </button>
-                    <button
-                      className="icon"
-                      data-testid={`layer-clip-${row.id}`}
-                      // The bottom layer has nothing below it to clip to: the
-                      // toggle is disabled rather than allowed to mean
-                      // "everything disappears".
-                      disabled={disabled || !row.clippedTo}
-                      title={
-                        !row.clippedTo
-                          ? 'Nothing below this layer to clip to'
-                          : row.clippingMask
-                            ? 'Remove clipping mask — show this layer everywhere'
-                            : 'Clip to layer below — show this layer only over the layer beneath'
-                      }
-                      aria-label={`${row.clippingMask ? 'Remove clipping mask from' : 'Clip'} layer ${row.name}`}
-                      aria-pressed={row.clippingMask === true}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onCommand(
-                          row.clippingMask ? 'Remove clipping mask' : 'Clip to layer below',
-                          setLayerClippingMask(row.id, !row.clippingMask),
-                        );
-                      }}
-                    >
-                      {row.clippingMask ? '▤' : '▥'}
-                    </button>
-                    <button
-                      className="icon"
-                      data-testid={`layer-rename-${row.id}`}
-                      disabled={disabled}
-                      title="Rename layer"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        startRename(row);
-                      }}
-                    >
-                      ✎
-                    </button>
-                    <button
-                      className="icon danger"
-                      data-testid={`layer-delete-${row.id}`}
-                      disabled={disabled}
-                      title="Delete layer (its nodes survive, unassigned)"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onCommand('Delete layer', deleteLayer(row.id));
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </>
-                ) : (
-                  <span className="layer-flags">
-                    {(row.ownVisible ?? true) ? '👁' : '⃠'}
-                    {(row.ownLocked ?? false) ? '🔒' : ''}
-                  </span>
-                )}
-              </span>
-            </li>
+              onToggleVisible={() =>
+                onCommand(
+                  row.visible ? 'Hide layer' : 'Show layer',
+                  setLayerVisible(row.id, !row.visible),
+                )
+              }
+              onToggleLocked={() =>
+                onCommand(
+                  row.locked ? 'Unlock layer' : 'Lock layer',
+                  setLayerLocked(row.id, !row.locked),
+                )
+              }
+              onToggleAlpha={() =>
+                onCommand(
+                  row.alphaLocked ? 'Unlock alpha' : 'Lock alpha',
+                  setLayerAlphaLocked(row.id, !row.alphaLocked),
+                )
+              }
+              onToggleClip={() =>
+                onCommand(
+                  row.clippingMask ? 'Remove clipping mask' : 'Clip to layer below',
+                  setLayerClippingMask(row.id, !row.clippingMask),
+                )
+              }
+              onDelete={() => onCommand('Delete layer', deleteLayer(row.id))}
+            />
           );
         })}
       </ul>
 
       {pendingNode && (
         <p className="hint" data-testid="layers-assign-hint">
-          Drop the selected node on a layer — or click one — to move it there.
+          Drop the selected object on a layer — or click one — to move it there.
         </p>
       )}
     </section>

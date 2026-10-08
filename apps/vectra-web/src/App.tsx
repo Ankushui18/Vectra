@@ -36,7 +36,11 @@ import { VectraClient } from './engine/client';
 import { documentHost } from './engine/host';
 import { DocumentBar } from './components/DocumentBar';
 import type { FileLogKind } from './components/DocumentBar';
-import ToolPalette, { DesignerRail } from './components/ToolPalette';
+import LeftDock from './components/LeftDock';
+import CanvasHUD from './components/CanvasHUD';
+import ContextualBottomBar from './components/ContextualBottomBar';
+import PropertiesPanel from './components/PropertiesPanel';
+import StudioDrawer from './components/StudioDrawer';
 import DrawOverlay from './components/DrawOverlay';
 import NavigationOverlay from './components/NavigationOverlay';
 import LayersPanel from './components/LayersPanel';
@@ -46,8 +50,19 @@ import ArtboardBar from './components/ArtboardBar';
 import ComponentPanel from './components/ComponentPanel';
 import MagicBar from './components/MagicBar';
 import DrawSettingsPanel from './components/DrawSettingsPanel';
-import { designerHint, showsMathPanels, toolForShortcut } from './engine/draw/tools';
+import { designerHint, toolForShortcut } from './engine/draw/tools';
 import type { ToolId } from './engine/draw/tools';
+// **Task 13.0**: the artist-first shell's model — the dock's groups, RULE 2's
+// type indicators, the bottom bar's contextual state and the HUD's placement.
+// Pure functions, unit-tested without a DOM (see `tests/task-13-0-shell.test.ts`).
+import {
+  bottomBarMode,
+  edgeReveal,
+  nodeState,
+  primitiveCentre,
+  selectionAnchor,
+} from './engine/theme';
+import type { BottomBarMode, DockActionId, HudActionId } from './engine/theme';
 import { DrawSession, initialSession, pointerCursor } from './engine/draw/session';
 import type { DrawSessionState } from './engine/draw/session';
 import {
@@ -106,7 +121,6 @@ import {
   createRectangle,
   createText,
   defineExpression,
-  deleteNode,
   disconnectProcedural,
   distanceConstraint,
   duplicateNode,
@@ -142,7 +156,6 @@ import {
   dragStatus,
   evalSummary,
   formatEvent,
-  layerRows,
   motionRows,
   motionSummary,
   exportSummary,
@@ -156,8 +169,11 @@ import {
   summaryLabels,
 } from './engine/view-model';
 import {
+  addFill,
+  addStroke,
   appearanceStack,
   boundTrack,
+  updateLayerAt,
   gridStyle,
   hexToColor,
   overlayBoards,
@@ -170,6 +186,24 @@ import {
   ZOOM_STEP,
 } from './engine/panels';
 import type { LogLine } from './engine/view-model';
+import {
+  Beaker as BeakerIcon,
+  Combine as CombineIcon,
+  Component as ComponentIcon,
+  Film as FilmIcon,
+  Layers as LayersIcon,
+  Magnet as MagnetIcon,
+  Maximize,
+  Minimize,
+  PanelRightClose,
+  PanelRightOpen,
+  Share2 as ShareIcon,
+  Sigma as SigmaIcon,
+  SlidersHorizontal as SlidersIcon,
+  Sparkles as SparklesIcon,
+  Workflow as WorkflowIcon,
+  X as CloseIcon,
+} from 'lucide-react';
 import type {
   AiCallWire,
   AiExecuteWire,
@@ -198,6 +232,9 @@ import type {
 
 interface LogEntry extends LogLine {
   seq: number;
+  /** The raw command JSON, kept for the Developer view and *only* shown there
+   *  (Task 13.0's "no raw JSON in the default layout"). */
+  detail?: string;
 }
 
 // ── Canvas (WebGPU, Task 5.0) ────────────────────────────────────────────
@@ -241,6 +278,10 @@ interface CanvasPaneProps {
   cursor: string;
   /** The drawing overlay — anchors, handles, the in-progress path. */
   overlay?: ReactNode;
+  /** Developer mode: the frame readout (bytes, draw calls) is diagnostics. */
+  showReadout?: boolean;
+  /** The empty-canvas hint, when there is nothing to draw yet. */
+  hint?: string;
 }
 
 function CanvasPane({
@@ -259,6 +300,8 @@ function CanvasPane({
   cursor,
   overlay,
   grid,
+  showReadout,
+  hint,
 }: CanvasPaneProps) {
   const down = status?.ready === false;
   return (
@@ -298,11 +341,11 @@ function CanvasPane({
           both taken from the renderer's own view. A grid that stayed put while
           the artwork panned would be a wrong ruler, which is worse than none. */}
       <div className="canvas-grid" style={grid} aria-hidden="true" />
-      {!hasNodes && (
+      {!hasNodes && hint ? (
         <div className="canvas-hint" data-testid="preview-hint">
-          Empty scene — Add a circle to begin the loop
+          {hint}
         </div>
-      )}
+      ) : null}
       {down && (
         <div className="canvas-banner" data-testid="canvas-banner">
           WebGPU unavailable — the scene is drawn by the engine but there is no
@@ -310,6 +353,7 @@ function CanvasPane({
           {status?.error ? <span className="sub"> {status.error}</span> : null}
         </div>
       )}
+      {showReadout && (
       <div className="canvas-frame" data-testid="frame-readout">
         {frame
           ? `frame ${frame.frame} · dirty ${frame.dirty}${frame.full ? ' (full)' : ''} · wrote ${
@@ -319,6 +363,7 @@ function CanvasPane({
             } · draw ${frame.draw_calls}`
           : 'frame —'}
       </div>
+      )}
     </div>
   );
 }
@@ -441,6 +486,29 @@ export default function App() {
   const [hoverOff, setHoverOff] = useState('200');
   const [hoverOn, setHoverOn] = useState('320');
 
+  // ── Task 13.0: the artist-first shell ─────────────────────────────────
+  //
+  // Five pieces of *presentation* state, and not one of them is a second
+  // opinion about the document. RULE 1's contextual layout, RULE 3's focus mode
+  // and the studio drawer are all ways of showing the same engine truth, which
+  // is why every handler below routes through the same `runCommand`/
+  // `runSequence` door the old panels used.
+  /** **RULE 3**: Tab hides every panel. `edgePeek` is the soft edge reveal. */
+  const [focusMode, setFocusMode] = useState(false);
+  const [edgePeek, setEdgePeek] = useState(false);
+  /** **RULE 1**: the right panel's tab (Layers ⟷ Properties) and its collapse. */
+  const [rightTab, setRightTab] = useState<'layers' | 'properties'>('layers');
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  /** The studio drawer: the parametric surfaces, behind one door. */
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerTab, setDrawerTab] = useState('parameters');
+  /** The diagnostics switch — off by default, because the brief asked for no
+   *  debug surface in the default layout, and on demand for the rest of us. */
+  const [devMode, setDevMode] = useState(false);
+  /** Where the HUD floats, in CSS pixels inside the canvas — computed from the
+   *  engine's own numbers through the renderer's own camera. */
+  const [hudPos, setHudPos] = useState<{ left: number; top: number } | null>(null);
+
   // ── Task 10.1: the drawing suite ──────────────────────────────────────
   //
   // The session is a *ref*, not state: it is the mutable mirror of what the
@@ -499,9 +567,9 @@ export default function App() {
     y: number;
   } | null>(null);
 
-  const appendLog = useCallback((kind: LogEntry['kind'], text: string) => {
+  const appendLog = useCallback((kind: LogEntry['kind'], text: string, detail?: string) => {
     seq.current += 1;
-    const entry = { seq: seq.current, kind, text };
+    const entry = { seq: seq.current, kind, text, detail };
     setLog((prev) => [...prev.slice(-199), entry]);
   }, []);
 
@@ -780,7 +848,7 @@ export default function App() {
   const runCommand = useCallback(
     (label: string, cmd: CommandWire) => {
       if (!client) return;
-      appendLog('cmd', `→ ${label} ${JSON.stringify(cmd)}`);
+      appendLog('cmd', `→ ${label}`, JSON.stringify(cmd));
       absorb(client, client.dispatch(cmd));
     },
     [client, appendLog, absorb],
@@ -921,7 +989,7 @@ export default function App() {
       if (!client) return;
       appendLog('cmd', `→ ${label}`);
       for (const cmd of cmds) {
-        appendLog('cmd', `  ↗ ${JSON.stringify(cmd)}`);
+        appendLog('cmd', `  ↗ ${cmd.type}`, JSON.stringify(cmd));
         const res = client.dispatch(cmd);
         logResponse(res);
         if (res.status === 'error') break;
@@ -1275,17 +1343,6 @@ export default function App() {
     );
   }, [client, exprSource, runCommand, appendLog]);
 
-  /**
-   * Toggle a layer in the selection. Two nodes are what a constraint needs, so
-   * a third click starts a new pair rather than growing a set.
-   */
-  const toggleSelection = useCallback((id: string) => {
-    setSelection((prev) => {
-      if (prev.includes(id)) return prev.filter((other) => other !== id);
-      return prev.length >= 2 ? [id] : [...prev, id];
-    });
-  }, []);
-
   const selected: ConstrainedLayer[] = selection.flatMap((id): ConstrainedLayer[] => {
     const node = snapshot?.scene.nodes[id];
     return node ? [{ id, primitive: node.primitive.type, name: node.name }] : [];
@@ -1384,11 +1441,15 @@ export default function App() {
     [pairReady, runCommand, selected],
   );
 
-  /** A modifier on the single selected source. */
+  /** A modifier on the single selected source.
+   *
+   *  `explicit` is how the canvas HUD's *Flip* sends a value it read off the
+   *  object (its own centre x) instead of the panel's number field — one
+   *  builder, two callers, so a flip and a typed mirror cannot differ. */
   const runModifier = useCallback(
-    (kind: 'offset' | 'fillet' | 'mirror') => {
+    (kind: 'offset' | 'fillet' | 'mirror', explicit?: number) => {
       const target = selected[0];
-      const value = Number(modValue);
+      const value = explicit ?? Number(modValue);
       if (!target || !Number.isFinite(value)) {
         appendLog('error', `✗ ${kind}: pick one layer and enter a number`);
         return;
@@ -2937,11 +2998,6 @@ export default function App() {
   const dirtySet = new Set(lastDirty);
   const constraints = constraintRows(snapshot?.constraints ?? {});
   const operations = operationRows(snapshot?.operations ?? {});
-  const layerTree = layerRows(
-    snapshot?.scene.z_order ?? [],
-    snapshot?.scene.nodes ?? {},
-    snapshot?.operations ?? {},
-  );
   const proceduralRowsView = proceduralRows(procedural);
   const proceduralPorts = proceduralPortOptions(procedural);
   const proceduralLine = proceduralSummary(procedural);
@@ -2955,71 +3011,424 @@ export default function App() {
   const depRows = dependencyRows(deps, snapshot?.scene.nodes ?? {});
   const graphSummary = deps?.status === 'ok' ? deps.summary : null;
 
+  // ── Task 13.0: the artist-first shell's handlers ──────────────────────
+  //
+  // Every control the new layout adds routes into the *same* engine door the
+  // previous panels used. That is the point of this block: the overhaul changes
+  // where a verb lives, never what it sends.
+
+  /**
+   * **Flip** (RULE 3's HUD): a `MirrorAxis` operation across the object's own
+   * centre, when the engine reports one.
+   *
+   * This is what "flip" honestly means in a document with no node transforms
+   * (roadmap 1.1): the mirror is a *new, editable object* composed from the
+   * original — the original does not move, and the operation stays live, so
+   * editing the source edits the reflection. With no centre to mirror across,
+   * the action says so rather than guessing an axis.
+   */
+  const runFlip = useCallback(() => {
+    const node = selectedNode(snapshot, selection);
+    if (!node) {
+      appendLog('info', 'flip · select one object first');
+      return;
+    }
+    const centre = primitiveCentre(node.primitive);
+    if (!centre) {
+      appendLog('info', 'flip · the engine reports no centre for this object');
+      return;
+    }
+    runModifier('mirror', centre.x);
+  }, [snapshot, selection, runModifier, appendLog]);
+
+  /**
+   * **Boolean from the HUD.** The engine's booleans are binary (audit §2.4), so
+   * "combine these two" is `union` — the safe, lossless one. Subtract and the
+   * rest stay in Pathfinder, where the operands can be seen and chosen.
+   */
+  const runBooleanFromHud = useCallback(() => {
+    if (selection.length !== 2) return;
+    runBoolean('union');
+  }, [selection.length, runBoolean]);
+
+  /**
+   * **The left dock's action entries** (RULE 1).
+   *
+   * Shape adds a primitive; Vector holds the boolean and modifier family that
+   * the Operations panel also offers — same builders, more reachable. Nothing
+   * here is new engine surface.
+   */
+  const runDockAction = useCallback(
+    (action: DockActionId) => {
+      switch (action) {
+        case 'add-circle':
+          runCommand(
+            'Circle',
+            createCircle({ cx: 220, cy: 170, r: 70, name: 'circle' }),
+          );
+          return;
+        case 'add-rectangle':
+          runCommand(
+            'Rectangle',
+            createRectangle({ x: 160, y: 120, w: 200, h: 130, name: 'rectangle' }),
+          );
+          return;
+        case 'boolean-union':
+        case 'boolean-subtract':
+        case 'boolean-intersect':
+        case 'boolean-exclude':
+          runBoolean(action.slice('boolean-'.length) as BooleanOpWire);
+          return;
+        case 'offset':
+        case 'fillet':
+        case 'mirror':
+          runModifier(action);
+          return;
+        case 'duplicate':
+          runCopyPaste();
+          return;
+        case 'flip':
+          runFlip();
+          return;
+      }
+    },
+    [runCommand, runBoolean, runModifier, runCopyPaste, runFlip],
+  );
+
+  /** **The canvas HUD's actions** (RULE 3) — three real verbs and the rest. */
+  const runHudAction = useCallback(
+    (action: HudActionId) => {
+      if (action === 'duplicate') runCopyPaste();
+      if (action === 'flip') runFlip();
+      if (action === 'boolean') runBooleanFromHud();
+      if (action === 'more') {
+        setRightTab('properties');
+        setDrawerOpen(false);
+      }
+    },
+    [runCopyPaste, runFlip, runBooleanFromHud],
+  );
+
+  /** Paint the selection's fill — one `SetAppearances`, one undo entry. */
+  const setFillColor = useCallback(
+    (color: string) => {
+      const node = selectedNode(snapshot, selection);
+      if (!node) return;
+      let stack = appearanceStack(node);
+      const at = stack.findIndex((row) => row.kind === 'fill');
+      stack =
+        at >= 0
+          ? updateLayerAt(stack, at, { paint: { type: 'solid', color }, visible: true })
+          : addFill(stack, color);
+      runCommand('Fill', setAppearances(node.id, stackToWire(stack)));
+    },
+    [snapshot, selection, runCommand],
+  );
+
+  /** Paint the selection's stroke — the same door, the stroke's own row. */
+  const setStrokeColor = useCallback(
+    (color: string) => {
+      const node = selectedNode(snapshot, selection);
+      if (!node) return;
+      let stack = appearanceStack(node);
+      const at = stack.findIndex((row) => row.kind === 'stroke');
+      stack =
+        at >= 0
+          ? updateLayerAt(stack, at, { paint: { type: 'solid', color }, visible: true })
+          : addStroke(stack, color, 2);
+      runCommand('Stroke', setAppearances(node.id, stackToWire(stack)));
+    },
+    [snapshot, selection, runCommand],
+  );
+
+  /** Stroke width, in the designer's units — the stroke row's own `width`. */
+  const setStrokeWidth = useCallback(
+    (width: number) => {
+      const node = selectedNode(snapshot, selection);
+      if (!node) return;
+      let stack = appearanceStack(node);
+      const at = stack.findIndex((row) => row.kind === 'stroke' && row.visible);
+      if (at < 0) return;
+      stack = updateLayerAt(stack, at, { width, visible: width > 0 });
+      runCommand('Stroke width', setAppearances(node.id, stackToWire(stack)));
+    },
+    [snapshot, selection, runCommand],
+  );
+
+  /** Geometry · Offset on the selection — the same modifier the dock sends. */
+  const runOffsetOnSelection = useCallback(
+    (value: number) => {
+      if (!Number.isFinite(value)) return;
+      runModifier('offset', value);
+    },
+    [runModifier],
+  );
+
+  /**
+   * **Corner / Smooth** (RULE 1's node bar): the one anchor conversion the
+   * engine actually has.
+   *
+   * A path's point *is* its handles: dragging one with Alt **breaks** the
+   * symmetry (the Handle Independence law) and dragging one without it
+   * **restores** it (the Handle Symmetry law). So converting a point is a
+   * handle drag that does not move anything — `draw_edit_command` at the
+   * handle's own coordinates. No new command, no invented geometry, and the
+   * undo entry is the ordinary one the engine already records.
+   */
+  const runNodeConvert = useCallback(
+    (kind: 'corner' | 'smooth') => {
+      const node = selectedNode(snapshot, selection);
+      const slot = draw.selectedSlot;
+      if (!client || !node || !slot) {
+        appendLog('info', `${kind} · pick a point with the Node tool first`);
+        return;
+      }
+      const anchor = draw.anchors.find((candidate) => candidate.slot === slot);
+      const handle = anchor?.handle_out;
+      if (!anchor || !handle) {
+        appendLog(
+          'info',
+          `${kind} · this point has no outgoing handle to shape (drag one out with the Node tool)`,
+        );
+        return;
+      }
+      // The engine hands back the *command* to run (the same one a hand drag
+      // would have produced), so it goes through the ordinary dispatch door:
+      // validation, history, dirty propagation and the renderer patch all come
+      // from the one path the rest of the app uses.
+      const command = client.drawEditCommand(
+        node.id,
+        slot,
+        'out',
+        handle[0],
+        handle[1],
+        // Alt is the *independence* flag: true breaks the symmetry (corner),
+        // false mirrors the opposite handle (smooth).
+        kind === 'corner',
+        false,
+      );
+      absorb(client, client.dispatch(command));
+      appendLog('ok', kind === 'corner' ? '✓ point is a corner' : '✓ point is smooth');
+    },
+    [client, snapshot, selection, draw.selectedSlot, draw.anchors, absorb, appendLog],
+  );
+
+  /** The node bar's Align slot: the engine has no align verb yet, and the bar
+   *  says so rather than pretending. Kept as a handler so the day it lands the
+   *  wiring is one line. */
+  const runNodeAlign = useCallback(() => {
+    appendLog('info', 'align · arrives with the constraint vocabulary (roadmap 1.2)');
+  }, [appendLog]);
+
+  /**
+   * The point's current state, in the brief's own words (RULE 1 names
+   * *Symmetric* and *Corner* among the node bar's controls).
+   *
+   * *Symmetric* is a state rather than a verb: a symmetric point is exactly a
+   * smooth one, so it is reported here beside the Convert/Smooth buttons instead
+   * of being offered as a third button that would do what one of them already
+   * does. The reading comes from the engine's own handles — never from what the
+   * shell last clicked.
+   */
+  const nodeStateLabel = (() => {
+    if (!draw.selectedSlot) return '—';
+    return nodeState(draw.anchors, draw.selectedSlot) === 'smooth'
+      ? 'Symmetric · Smooth'
+      : 'Corner';
+  })();
+
+  /** **RULE 1's contextual state**, computed by the pure model. */
+  const barMode: BottomBarMode = bottomBarMode({
+    tool: draw.tool,
+    selectionCount: selection.length,
+    selectedIsGeometry: Boolean(selectedNode(snapshot, selection)),
+    anchorOwned: draw.selectedSlot !== null,
+  });
+
+  /** The brush bar's name: the tool in hand, in the designer's words. */
+  const drawStatusLabel = draw.tool === 'pen' ? 'Pen' : 'Brush';
+
+  // ── RULE 3: focus mode, the HUD's placement, and the edge reveal ──────
+
+  /** Tab hides the chrome; Escape leaves focus mode (never the other way —
+   *  Escape already means "cancel the gesture" everywhere else). */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        setFocusMode((on) => !on);
+        return;
+      }
+      if (focusMode && event.key === 'Escape') {
+        setFocusMode(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusMode]);
+
+  /**
+   * **RULE 4's keyboard half**: ⌘Z / Ctrl+Z undoes, ⌘⇧Z and Ctrl+Y redo.
+   *
+   * The touch gestures already land here (`runTouchAction`), so this is the
+   * other hand doing the same thing — same commands, same history.
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) runRedo();
+        else runUndo();
+        return;
+      }
+      if (key === 'y') {
+        event.preventDefault();
+        runRedo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [runUndo, runRedo]);
+
+  /** **RULE 3's soft edge reveal**: the pointer near a window edge wakes the
+   *  chrome. Registered on the window, because in focus mode the canvas *is*
+   *  the window. */
+  useEffect(() => {
+    if (!focusMode) {
+      setEdgePeek(false);
+      return;
+    }
+    const onMove = (event: PointerEvent) => {
+      const peek = edgeReveal(
+        { x: event.clientX, y: event.clientY },
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+      setEdgePeek((previous) => (previous === peek ? previous : peek));
+    };
+    window.addEventListener('pointermove', onMove);
+    return () => window.removeEventListener('pointermove', onMove);
+  }, [focusMode]);
+
+  /** **RULE 1's switch**: an object selected ⟹ the panel becomes Properties. */
+  const hasSelection = selection.length > 0;
+  useEffect(() => {
+    setRightTab(hasSelection ? 'properties' : 'layers');
+  }, [hasSelection]);
+
+  /**
+   * **Where the HUD goes.** The anchor is the top-centre of the selection's box
+   * in *document* units (the engine's own numbers — `selectionAnchor`), and the
+   * renderer maps it to the screen with the camera the pixels were drawn with.
+   * No anchor ⟹ no HUD: a floating menu that points at nothing is worse than no
+   * floating menu.
+   */
+  useEffect(() => {
+    if (!client || selection.length === 0) {
+      setHudPos(null);
+      return;
+    }
+    const node = selectedNode(snapshot, selection);
+    const anchor = selectionAnchor(node ?? undefined, 1 / Math.max(zoom ?? 1, 0.01));
+    if (!anchor) {
+      setHudPos(null);
+      return;
+    }
+    const mapped = client.documentToClient([[anchor.x, anchor.y]]);
+    const first = mapped[0];
+    setHudPos(first ? { left: first[0], top: Math.max(8, first[1] - 40) } : null);
+  }, [client, selection, snapshot, zoom, view]);
+
   return (
-    <div className="app">
-      <header className="header">
-        <div className="brand">
-          <span className="brand-mark">⚙</span>
-          <div>
-            <h1>VECTRA</h1>
-            <p>Engine remote · Tasks 3.1–3.2 · constraints + drag</p>
-          </div>
-        </div>
-        <div className="header-right">
-          {snapshot && (
-            <div className="eval-chip" data-testid="eval-chip">
-              <span className="eval-mode">{snapshot.eval.last_mode}</span>
-              <span className="eval-detail">{evalSummary(snapshot.eval)}</span>
-            </div>
+    <div
+      className={[
+        'app',
+        focusMode ? 'focus-mode' : '',
+        focusMode && edgePeek ? 'focus-peek' : '',
+        drawerOpen ? 'drawer-open' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      data-testid="app-shell"
+      data-focus={focusMode ? 'on' : 'off'}
+    >
+      {/* ── The top bar ─────────────────────────────────────────────────
+          File, the artboard, and the two switches that leave the surface:
+          Studio (every parametric panel, one door) and Focus (Tab). */}
+      <header className="top-bar" data-testid="top-bar">
+        <span className="brand" title="VECTRA">
+          <span className="brand-mark">V</span>
+          <span className="brand-name">VECTRA</span>
+        </span>
+        <DocumentBar
+          host={host}
+          documentJson={() => client?.documentJson() ?? ''}
+          onReplay={replayPlan}
+          onLog={fileLog}
+          ready={client !== null}
+        />
+        <ArtboardBar
+          snapshot={snapshot}
+          onCommand={runCommand}
+          onFrame={frameDocument}
+          onExportCurrent={exportCurrentArtboard}
+          onExportAll={exportAllArtboards}
+          disabled={!ready}
+        />
+        <span className="top-spacer" />
+        {snapshot && devMode && (
+          <span className="dev-chip" data-testid="eval-chip">
+            {snapshot.eval.last_mode} · {evalSummary(snapshot.eval)}
+          </span>
+        )}
+        <span className={`engine-dot status-${status}`} data-testid="engine-status" title={statusDetail} />
+        <button
+          type="button"
+          className="top-btn"
+          data-testid="studio-open"
+          title="Studio — parameters, constraints, generators, motion, export"
+          aria-label="Open the studio"
+          aria-pressed={drawerOpen}
+          onClick={() => setDrawerOpen((open) => !open)}
+        >
+          <PanelRightOpen size={16} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="top-btn"
+          data-testid="focus-toggle"
+          title="Focus mode — hides every panel (Tab)"
+          aria-label="Toggle focus mode"
+          aria-pressed={focusMode}
+          onClick={() => setFocusMode((on) => !on)}
+        >
+          {focusMode ? (
+            <Minimize size={16} strokeWidth={1.75} aria-hidden="true" />
+          ) : (
+            <Maximize size={16} strokeWidth={1.75} aria-hidden="true" />
           )}
-          <div className={`status status-${status}`} data-testid="engine-status">
-            <span className="dot" />
-            {statusDetail}
-          </div>
-        </div>
+        </button>
       </header>
 
-      <DocumentBar
-        host={host}
-        documentJson={() => client?.documentJson() ?? ''}
-        onReplay={replayPlan}
-        onLog={fileLog}
-        ready={client !== null}
-      />
+      <div className="workspace">
+        <LeftDock tool={draw.tool} onTool={chooseTool} onAction={runDockAction} disabled={!ready} />
 
-      <ArtboardBar
-        snapshot={snapshot}
-        onCommand={runCommand}
-        onFrame={frameDocument}
-        onExportCurrent={exportCurrentArtboard}
-        onExportAll={exportAllArtboards}
-        disabled={!ready}
-      />
-
-      <main className="main">
-        <section className="panel canvas-panel">
-          <h2>
-            Canvas{' '}
-            <span className="sub">
-              WebGPU · the engine tessellates snapshot.scene, the GPU draws it
-            </span>
-          </h2>
-          <ToolPalette
-            tool={draw.tool}
-            onSelect={chooseTool}
-            disabled={!ready}
-            status={drawStatus}
-          />
-          <DrawSettingsPanel
-            tool={draw.tool}
-            streamline={streamline}
-            onStreamline={setStreamline}
-            color={dropColor}
-            onColor={setDropColor}
-            onDropStart={startColorDrop}
-            dragging={dropPos !== null}
-            disabled={!ready}
-          />
+        <main className="stage">
           <CanvasPane
             canvasRef={canvasRef}
             onPointerDown={onCanvasDown}
@@ -3035,6 +3444,12 @@ export default function App() {
             frame={frame}
             cursor={pointerCursor(draw.tool, draw.isDrawing)}
             grid={gridStyle(view, zoom)}
+            showReadout={devMode}
+            hint={
+              focusMode
+                ? 'Tab brings everything back · move to an edge to peek'
+                : 'Pick a tool on the left, or draw'
+            }
             overlay={
               <>
                 <NavigationOverlay
@@ -3049,15 +3464,15 @@ export default function App() {
                   disabled={!ready}
                 />
                 <DrawOverlay
-                overlay={placed}
-                selectedSlot={draw.selectedSlot}
-                hoveredSlot={draw.hoveredSlot}
+                  overlay={placed}
+                  selectedSlot={draw.selectedSlot}
+                  hoveredSlot={draw.hoveredSlot}
                   holding={draw.isHoldingForSnap}
                   snapNote={draw.snapNote}
                 />
-                {/* **Task 12.0**: the face under the pointer — the Smart Fill
-                    tool's hover, and RULE 4's drop preview. Both read the same
-                    plan, so what glows is what the click or the drop fills. */}
+                {/* **The face under the pointer** — the Fill tool's hover, and
+                    the colour drop's preview. Both read the same plan, so what
+                    glows is what the click or the drop fills. */}
                 {(draw.tool === 'smartFill' || dropPos !== null) && (
                   <RegionOverlay
                     shape={regionShape(regionPlan)}
@@ -3065,1103 +3480,1190 @@ export default function App() {
                     status={draw.tool === 'smartFill' ? regionStatus(regionPlan) : null}
                   />
                 )}
+                {/* **RULE 3**: the selection's quick actions, floating above it
+                    — placed by the renderer's own camera, never by a transform
+                    here. */}
+                {hudPos && !focusMode && (
+                  <CanvasHUD
+                    left={hudPos.left}
+                    top={hudPos.top}
+                    selectionCount={selection.length}
+                    primaryName={selectedNode(snapshot, selection)?.name ?? null}
+                    onAction={runHudAction}
+                    disabled={!ready}
+                  />
+                )}
               </>
             }
           />
-          <div className="drag-strip" data-testid="drag-status">
-            {gestureLine ??
-              (draw.tool === 'select'
-                ? 'Drag a node: the pointer sends BeginDrag / UpdateDrag / EndDrag — the engine moves the geometry.'
-                : drawStatus)}
+          <div className="status-line" data-testid="drag-status">
+            {gestureLine ?? drawStatus}
             {holdNote ? <span className="hold-note"> · {holdNote}</span> : null}
           </div>
-          <div className="diag-strip" data-testid="diagnostics">
-            {diagnostics.length === 0 ? (
-              <span className="diag-clean">✓ evaluation clean — no diagnostics</span>
-            ) : (
-              diagnostics.map((d, i) => (
-                <span key={i} className={`diag diag-${d.severity}`}>
-                  [{d.severity}] {d.code}: {d.message}
-                </span>
-              ))
-            )}
-          </div>
-        </section>
+          {devMode && (
+            <div className="diag-strip" data-testid="diagnostics">
+              {diagnostics.length === 0 ? (
+                <span className="diag-clean">✓ evaluation clean — no diagnostics</span>
+              ) : (
+                diagnostics.map((d, i) => (
+                  <span key={i} className={`diag diag-${d.severity}`}>
+                    [{d.severity}] {d.code}: {d.message}
+                  </span>
+                ))
+              )}
+            </div>
+          )}
+        </main>
 
-        <aside className="side">
-          {!showsMathPanels(draw.tool) && (
-            <DesignerRail
-              tool={draw.tool}
-              anchors={draw.anchors.length}
-              segments={draw.draft?.kinds.length ?? null}
-              selected={anchorLabel(draw.anchors, draw.selectedSlot)}
-              status={drawStatus}
-            />
-          )}
-          {/* RULE 1: the Layers Panel is always there — it is the document's
-              spine, not a mode. RULE 3: the Appearance Panel appears only with a
-              single unlocked object selected. */}
-          <LayersPanel
-            snapshot={snapshot}
-            expanded={expandedLayers}
-            onToggleExpanded={(layerId) =>
-              setExpandedLayers((prev) => {
-                const next = new Set(prev);
-                if (next.has(layerId)) next.delete(layerId);
-                else next.add(layerId);
-                return next;
-              })
-            }
-            onCommand={runCommand}
-            onAssignNode={(layerId) => {
-              const node = selection[0];
-              if (node) runCommand('Move to layer', assignNodeToLayer(node, layerId));
-            }}
-            selection={selection}
-            onGroupSelection={groupSelection}
-            pendingNode={selection.length === 1 && showsAppearancePanel(snapshot, selection) ? selection[0] : null}
-            disabled={!ready}
-          />
-          {showsAppearancePanel(snapshot, selection) && (
-            <AppearancePanel
-              node={selectedNode(snapshot, selection)}
-              onCommand={runCommand}
-              disabled={!ready}
-              spans={selectedSpans}
-              onBreakPath={breakSelectedPath}
-            />
-          )}
-          {/* **Task 11.0**: the typography inspector, immediately below the
-              Appearance panel because that is the pair a selected word needs —
-              what it *says*, then how it is *painted*. Both obey the same
-              one-selection rule (`showsTextPanel` narrows it to a run). */}
-          {showsTextPanel(snapshot, selection) && (
-            <TextPanel
-              node={selectedNode(snapshot, selection)}
-              fonts={snapshot?.scene.fonts ?? []}
-              pathLength={boundTrack(selectedNode(snapshot, selection))}
-              onCommand={runCommand}
-              onOutline={outlineTextNode}
-              onBind={(nodeId, pathId) =>
-                runCommand('Bind text to path', bindTextToPath(nodeId, pathId, lit(0)))
-              }
-              onUnbind={(nodeId) =>
-                runCommand('Unbind text', unbindTextFromPath(nodeId))
-              }
-              disabled={!ready}
-            />
-          )}
-          {showsMathPanels(draw.tool) && (
-            <>
-          <section className="panel">
-            <h2>Actions</h2>
-            <div className="btn-row">
-              <button
-                data-testid="add-circle"
-                disabled={!ready}
-                onClick={() =>
-                  runCommand(
-                    'Add Circle',
-                    createCircle({ cx: 100, cy: 100, r: 50, name: 'circle' }),
-                  )
-                }
-              >
-                + Circle
-              </button>
-              <button
-                data-testid="add-rectangle"
-                disabled={!ready}
-                onClick={() =>
-                  runCommand(
-                    'Add Rectangle',
-                    createRectangle({ x: 200, y: 150, w: 160, h: 100, name: 'rect' }),
-                  )
-                }
-              >
-                + Rectangle
-              </button>
-            </div>
-            <div className="btn-row">
-              <button
-                data-testid="add-bound-rectangle"
-                disabled={!ready}
-                title="Rectangle whose width reads $base — creating it adds a dependency edge"
-                onClick={runAddBoundRectangle}
-              >
-                ⛓ Rect ← $base
-              </button>
-              <button
-                data-testid="add-bound-circle"
-                disabled={!ready}
-                title="Circle whose radius reads an expression — depth 2 in the graph"
-                onClick={runAddBoundCircle}
-              >
-                ⛓ Circle ← ƒx
-              </button>
-            </div>
-            <div className="btn-row">
-              <button
-                data-testid="force-full-reeval"
-                disabled={!ready}
-                title="Rebuild the whole scene; the incremental result must be identical"
-                onClick={runFullReeval}
-              >
-                ↻ Full re-eval
-              </button>
-              <span className="hint">patch ≡ rebuild, every time</span>
-            </div>
-            <div className="btn-row">
-              <button
-                data-testid="undo"
-                disabled={!ready || !snapshot?.can_undo}
-                onClick={runUndo}
-              >
-                ↩ Undo
-              </button>
-              <button
-                data-testid="redo"
-                disabled={!ready || !snapshot?.can_redo}
-                onClick={runRedo}
-              >
-                ↪ Redo
-              </button>
-            </div>
-            <label className="time-row">
-              <span>time {(snapshot?.time ?? 0).toFixed(1)}s</span>
-              <input
-                type="range"
-                min={0}
-                max={10}
-                step={0.1}
-                value={snapshot?.time ?? 0}
-                disabled={!ready}
-                onChange={(e) => runSetTime(Number(e.target.value))}
-                aria-label="Engine time"
-              />
-            </label>
-          </section>
+        {/* ── The right panel (RULE 1) ─────────────────────────────────────
+            Layers by default; Properties the moment something is selected. */}
+        <aside className={`side-panel${rightCollapsed ? ' collapsed' : ''}`} data-testid="right-panel">
+          <nav className="side-tabs" role="tablist" aria-label="Inspector">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={rightTab === 'layers'}
+              className={`side-tab${rightTab === 'layers' ? ' active' : ''}`}
+              data-testid="tab-layers"
+              onClick={() => setRightTab('layers')}
+            >
+              <LayersIcon size={15} strokeWidth={1.75} aria-hidden="true" />
+              <span>Layers</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={rightTab === 'properties'}
+              className={`side-tab${rightTab === 'properties' ? ' active' : ''}`}
+              data-testid="tab-properties"
+              title="Properties of the selection"
+              onClick={() => setRightTab('properties')}
+            >
+              <SlidersIcon size={15} strokeWidth={1.75} aria-hidden="true" />
+              <span>Properties</span>
+            </button>
+            <span className="side-tabs-spacer" />
+            <button
+              type="button"
+              className="icon"
+              data-testid="panel-collapse"
+              title={rightCollapsed ? 'Show the panel' : 'Hide the panel'}
+              aria-label={rightCollapsed ? 'Show the inspector' : 'Hide the inspector'}
+              onClick={() => setRightCollapsed((collapsed) => !collapsed)}
+            >
+              <PanelRightClose size={15} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </nav>
 
-          {/* ── Task 6.0: motion ───────────────────────────────────────
-              Everything here is a report or a single intent. The panel shows
-              what the engine says it is doing (`motionSummary`), which flags
-              the host currently holds down, and every binding — and the buttons
-              send a slot plus two numbers, or toggle a state flag. Nothing in
-              this section knows what a spring is. */}
-          <section className="panel">
-            <h2>
-              Motion{' '}
-              <span
-                className={animating ? 'badge-live' : 'sub'}
-                data-testid="motion-status"
-              >
-                {motionSummary(motion)}
-              </span>
-            </h2>
-            <p className="empty" data-testid="motion-hint">
-              {selected.length === 1
-                ? `${selected[0].name}: bind a hover spring, or ramp its x with a keyframe track`
-                : 'Select one layer to give it motion.'}
-            </p>
-            <div className="btn-row">
-              <label className="field">
-                <span>rest</span>
-                <input
-                  type="number"
-                  value={hoverOff}
-                  disabled={!ready}
-                  onChange={(e) => setHoverOff(e.target.value)}
-                  aria-label="Hover rest value"
-                />
-              </label>
-              <label className="field">
-                <span>hover</span>
-                <input
-                  type="number"
-                  value={hoverOn}
-                  disabled={!ready}
-                  onChange={(e) => setHoverOn(e.target.value)}
-                  aria-label="Hover value"
-                />
-              </label>
-            </div>
-            <div className="btn-row">
-              <button
-                data-testid="motion-bind"
-                disabled={!ready || selected.length !== 1}
-                title="Bind a spring that eases toward the hover value while the pointer is over the shape"
-                onClick={runBindHover}
-              >
-                Bind hover spring
-              </button>
-              <label className="check" title="Hold the hover flag by hand instead of moving the pointer">
-                <input
-                  type="checkbox"
-                  data-testid="motion-hover"
-                  disabled={!ready || selected.length !== 1}
-                  checked={
-                    selected.length === 1 &&
-                    (motion?.states.includes(`hover:${selected[0].id}`) ?? false)
+          {!rightCollapsed && (
+            <div className="side-body">
+              {rightTab === 'layers' ? (
+                <LayersPanel
+                  snapshot={snapshot}
+                  expanded={expandedLayers}
+                  onToggleExpanded={(layerId) =>
+                    setExpandedLayers((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(layerId)) next.delete(layerId);
+                      else next.add(layerId);
+                      return next;
+                    })
                   }
-                  onChange={(e) => runToggleHover(e.target.checked)}
+                  onCommand={runCommand}
+                  onAssignNode={(layerId) => {
+                    const node = selection[0];
+                    if (node) runCommand('Move to layer', assignNodeToLayer(node, layerId));
+                  }}
+                  selection={selection}
+                  onGroupSelection={groupSelection}
+                  pendingNode={
+                    selection.length === 1 && showsAppearancePanel(snapshot, selection)
+                      ? selection[0]
+                      : null
+                  }
+                  disabled={!ready}
                 />
-                <span>hover</span>
-              </label>
-            </div>
-            <div className="btn-row">
-              <button
-                data-testid="motion-track"
-                disabled={!ready || selected.length !== 1}
-                title="Register a three-key x ramp and bind the slot to it"
-                onClick={runRampTrack}
-              >
-                Ramp x (track)
-              </button>
-              <button
-                data-testid="motion-reeval"
-                disabled={!ready}
-                title="Rebuild the whole scene from scratch (patch ≡ rebuild)"
-                onClick={runFullReeval}
-              >
-                Re-evaluate all
-              </button>
-            </div>
-            {motion && motion.tracks.length > 0 && (
-              <div className="chips" data-testid="motion-tracks">
-                {motion.tracks.map((id) => (
-                  <button
-                    key={id}
-                    className="chip"
-                    title={`Remove track ${id}`}
-                    onClick={() => runRemoveTrack(id)}
-                  >
-                    ♪ {id} ✕
-                  </button>
-                ))}
-              </div>
-            )}
-            {stateChips(motion).length > 0 && (
-              <div className="chips" data-testid="motion-states">
-                {stateChips(motion).map((chip) => (
-                  <span key={chip} className="chip">
-                    ◉ {chip}
-                  </span>
-                ))}
-              </div>
-            )}
-            <ul className="motion" data-testid="motion-bindings">
-              {motionRows(motion).map((row) => (
-                <li key={`${row.nodeId}:${row.property}`}>
-                  <span className={row.active ? 'motion-live' : 'motion-rest'}>
-                    {row.kind === 'spring' ? '≈' : row.kind === 'track' ? '♪' : '◉'}
-                  </span>
-                  <span className="motion-detail">{row.detail}</span>
-                  <span className="motion-value">{row.value}</span>
-                  <button
-                    className="icon-btn"
-                    data-testid={`motion-unbind-${row.property}`}
-                    title={`Unbind ${row.property} (writes the engine's current value)`}
-                    onClick={() => runUnbind({ nodeId: row.nodeId, property: row.property })}
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          <section className="panel">
-            <h2>Layers <span className="sub">{layers.length}</span></h2>
-            {layers.length === 0 ? (
-              <p className="empty">No layers yet.</p>
-            ) : (
-              <ul className="layers" data-testid="layers">
-                {layerTree.map((row) => {
-                  const n = snapshot!.scene.nodes[row.id];
-                  const picked = selection.includes(row.id);
-                  // Task 4.0: an operation row is nested under the source it
-                  // reads and is NOT an operand itself (Phase 1 keeps
-                  // operations one level deep), so it is not selectable.
-                  return (
-                    <li
-                      key={row.id}
-                      data-testid={`layer-${row.id}`}
-                      data-op={row.isOperation ? 'true' : undefined}
-                      aria-selected={picked}
-                      title={
-                        row.isOperation
-                          ? `${row.operands} — a virtual node over its sources; the sources stay editable`
-                          : 'Click to select for a constraint or an operation (two layers)'
+              ) : (
+                <>
+                  <PropertiesPanel
+                    node={selectedNode(snapshot, selection)}
+                    nodeName={selectedNode(snapshot, selection)?.name ?? null}
+                    onCommand={runCommand}
+                    onOffset={runOffsetOnSelection}
+                    disabled={!ready}
+                  />
+                  {showsAppearancePanel(snapshot, selection) && (
+                    <AppearancePanel
+                      node={selectedNode(snapshot, selection)}
+                      onCommand={runCommand}
+                      disabled={!ready}
+                      spans={selectedSpans}
+                      onBreakPath={breakSelectedPath}
+                    />
+                  )}
+                  {showsTextPanel(snapshot, selection) && (
+                    <TextPanel
+                      node={selectedNode(snapshot, selection)}
+                      fonts={snapshot?.scene.fonts ?? []}
+                      pathLength={boundTrack(selectedNode(snapshot, selection))}
+                      onCommand={runCommand}
+                      onOutline={outlineTextNode}
+                      onBind={(nodeId, pathId) =>
+                        runCommand('Bind text to path', bindTextToPath(nodeId, pathId, lit(0)))
                       }
-                      className={[
-                        'layer',
-                        row.isOperation ? 'layer-op' : '',
-                        row.depth > 0 ? 'layer-nested' : '',
-                        dirtySet.has(row.id) ? 'layer-dirty' : '',
-                        picked ? 'layer-selected' : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' ')}
-                      onClick={() => {
-                        if (!row.isOperation) toggleSelection(row.id);
-                      }}
-                    >
-                      <span className="kind-tag">
-                        {row.isOperation ? row.tag : n?.primitive.type}
-                      </span>
-                      <span className="layer-name">
-                        {row.isOperation && <span className="op-glyph">{row.operands}</span>}
-                        {row.name}
-                      </span>
-                      {picked && (
-                        <span className="pick-chip">{selection[0] === row.id ? '1' : '2'}</span>
-                      )}
-                      {dirtySet.has(row.id) && (
-                        <span className="dirty-chip" title="re-evaluated by the last edit">
-                          ⚡
+                      onUnbind={(nodeId) => runCommand('Unbind text', unbindTextFromPath(nodeId))}
+                      disabled={!ready}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </aside>
+      </div>
+
+      {/* ── The dynamic bottom bar (RULE 1) ──────────────────────────────── */}
+      <ContextualBottomBar
+        mode={barMode}
+        selectionCount={selection.length}
+        node={selectedNode(snapshot, selection)}
+        brushName={drawStatusLabel}
+        brushSize={12}
+        brushOpacity={1}
+        brushExtras={
+          draw.tool === 'brush' || draw.tool === 'pen' ? (
+            <DrawSettingsPanel
+              tool={draw.tool}
+              streamline={streamline}
+              onStreamline={setStreamline}
+              color={dropColor}
+              onColor={setDropColor}
+              onDropStart={startColorDrop}
+              dragging={dropPos !== null}
+              disabled={!ready}
+            />
+          ) : null
+        }
+        onFillColor={setFillColor}
+        onStrokeColor={setStrokeColor}
+        onStrokeWidth={setStrokeWidth}
+        onNodeConvert={runNodeConvert}
+        nodeAlign={nodeStateLabel}
+        onNodeAlign={runNodeAlign}
+        canUndo={snapshot?.can_undo ?? false}
+        canRedo={snapshot?.can_redo ?? false}
+        onUndo={runUndo}
+        onRedo={runRedo}
+        zoom={zoom}
+        onZoomIn={() => zoomBy(ZOOM_STEP)}
+        onZoomOut={() => zoomBy(1 / ZOOM_STEP)}
+        onZoomFit={zoomFit}
+        disabled={!ready}
+      />
+
+      {/* ── The studio (RULE 1's "nothing else on screen") ───────────────── */}
+      <StudioDrawer
+        open={drawerOpen && !focusMode}
+        onClose={() => setDrawerOpen(false)}
+        active={drawerTab}
+        onActive={setDrawerTab}
+        dev={devMode}
+        onDev={setDevMode}
+        disabled={!ready}
+        tabs={[
+          { id: 'parameters', label: 'Parameters', icon: SigmaIcon, content: <>
+              <section className="panel">
+                <h2>Variables <span className="sub">{variables.length}</span></h2>
+                {variables.length === 0 ? (
+                  <p className="empty">No variables yet.</p>
+                ) : (
+                  <ul className="vars" data-testid="variables">
+                    {variables.map(([name, value]) => (
+                      <li key={name}>
+                        <span className="var-name">${name}</span>
+                        <span className="var-value">{value}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="var-form">
+                  <input
+                    value={varName}
+                    onChange={(e) => setVarName(e.target.value)}
+                    placeholder="name"
+                    aria-label="Variable name"
+                  />
+                  <input
+                    value={varValue}
+                    onChange={(e) => setVarValue(e.target.value)}
+                    placeholder="value"
+                    inputMode="decimal"
+                    aria-label="Variable value"
+                  />
+                  <button data-testid="set-variable" disabled={!ready} onClick={runSetVariable}>
+                    Set
+                  </button>
+                </div>
+              </section>
+              <section className="panel">
+                <h2>Expressions <span className="sub">ƒx · {expressions.length}</span></h2>
+                {expressions.length === 0 ? (
+                  <p className="empty">No expressions yet.</p>
+                ) : (
+                  <ul className="vars" data-testid="expressions">
+                    {expressions.map(([id, source]) => (
+                      <li key={id}>
+                        <span className="layer-id">{id.slice(0, 8)}</span>
+                        <span className="var-name">{source}</span>
+                        <button
+                          className="icon-btn"
+                          title={`Remove ${source}`}
+                          onClick={() =>
+                            runCommand(`RemoveExpression ${source}`, removeExpression(id))
+                          }
+                        >
+                          ✕
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="var-form">
+                  <input
+                    value={exprSource}
+                    onChange={(e) => setExprSource(e.target.value)}
+                    placeholder="$base * 2 + 10"
+                    aria-label="Expression source"
+                    data-testid="expression-source"
+                  />
+                  <button
+                    data-testid="define-expression"
+                    disabled={!ready}
+                    onClick={runDefineExpression}
+                  >
+                    ƒx Define
+                  </button>
+                </div>
+              </section>
+              <section className="panel">
+                <h2>Actions</h2>
+                <div className="btn-row">
+                  <button
+                    data-testid="add-circle"
+                    disabled={!ready}
+                    onClick={() =>
+                      runCommand(
+                        'Add Circle',
+                        createCircle({ cx: 100, cy: 100, r: 50, name: 'circle' }),
+                      )
+                    }
+                  >
+                    + Circle
+                  </button>
+                  <button
+                    data-testid="add-rectangle"
+                    disabled={!ready}
+                    onClick={() =>
+                      runCommand(
+                        'Add Rectangle',
+                        createRectangle({ x: 200, y: 150, w: 160, h: 100, name: 'rect' }),
+                      )
+                    }
+                  >
+                    + Rectangle
+                  </button>
+                </div>
+                <div className="btn-row">
+                  <button
+                    data-testid="add-bound-rectangle"
+                    disabled={!ready}
+                    title="Rectangle whose width reads $base — creating it adds a dependency edge"
+                    onClick={runAddBoundRectangle}
+                  >
+                    ⛓ Rect ← $base
+                  </button>
+                  <button
+                    data-testid="add-bound-circle"
+                    disabled={!ready}
+                    title="Circle whose radius reads an expression — depth 2 in the graph"
+                    onClick={runAddBoundCircle}
+                  >
+                    ⛓ Circle ← ƒx
+                  </button>
+                </div>
+                <div className="btn-row">
+                  <button
+                    data-testid="force-full-reeval"
+                    disabled={!ready}
+                    title="Rebuild the whole scene; the incremental result must be identical"
+                    onClick={runFullReeval}
+                  >
+                    ↻ Full re-eval
+                  </button>
+                  <span className="hint">patch ≡ rebuild, every time</span>
+                </div>
+                <div className="btn-row">
+                  <button
+                    data-testid="undo"
+                    disabled={!ready || !snapshot?.can_undo}
+                    onClick={runUndo}
+                  >
+                    ↩ Undo
+                  </button>
+                  <button
+                    data-testid="redo"
+                    disabled={!ready || !snapshot?.can_redo}
+                    onClick={runRedo}
+                  >
+                    ↪ Redo
+                  </button>
+                </div>
+                <label className="time-row">
+                  <span>time {(snapshot?.time ?? 0).toFixed(1)}s</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={10}
+                    step={0.1}
+                    value={snapshot?.time ?? 0}
+                    disabled={!ready}
+                    onChange={(e) => runSetTime(Number(e.target.value))}
+                    aria-label="Engine time"
+                  />
+                </label>
+              </section>
+
+              {/* ── Task 6.0: motion ───────────────────────────────────────
+                  Everything here is a report or a single intent. The panel shows
+                  what the engine says it is doing (`motionSummary`), which flags
+                  the host currently holds down, and every binding — and the buttons
+                  send a slot plus two numbers, or toggle a state flag. Nothing in
+                  this section knows what a spring is. */}
+          </> },
+          { id: 'constraints', label: 'Constraints', icon: MagnetIcon, content: <>
+              <section className="panel">
+                <h2>
+                  Constraints{' '}
+                  <span className="sub">
+                    {constraints.length} · {solverLine}
+                  </span>
+                </h2>
+                <p className="empty" data-testid="constraint-hint">
+                  {pairReady
+                    ? `Constrain ${selected[0].name} ↔ ${selected[1].name} (${selected[0].name} is the anchor)`
+                    : 'Click two Layers rows to pick a pair.'}
+                </p>
+                <div className="btn-row">
+                  <button
+                    data-testid="add-vertical-constraint"
+                    disabled={!ready || !pairReady}
+                    title="Enforce x(node₂) == x(node₁)"
+                    onClick={runAddVertical}
+                  >
+                    Vertical
+                  </button>
+                  <button
+                    data-testid="add-coincident-constraint"
+                    disabled={!ready || !pairReady}
+                    title="Two rules: the centres coincide on both axes"
+                    onClick={runAddCoincident}
+                  >
+                    Coincident
+                  </button>
+                  <button
+                    data-testid="add-distance-constraint"
+                    disabled={!ready || !pairReady}
+                    title="Capture the current separation on x and hold it"
+                    onClick={() => runAddDistance()}
+                  >
+                    Hold distance
+                  </button>
+                  <button
+                    data-testid="over-constrain"
+                    disabled={!ready || constraints.length === 0}
+                    title="Add the same separation at +100, weakly: the engine drops the weaker rule and logs a diagnostic"
+                    onClick={runOverConstrain}
+                  >
+                    Over-constrain
+                  </button>
+                </div>
+                {constraints.length === 0 ? (
+                  <p className="empty">No constraints yet — the solver is idle.</p>
+                ) : (
+                  <ul className="constraints" data-testid="constraint-list">
+                    {constraints.map((c) => (
+                      <li
+                        key={c.id}
+                        data-testid={`constraint-${c.id}`}
+                        className={c.dropped ? 'constraint-dropped' : ''}
+                      >
+                        <span className="kind-tag">{c.kind}</span>
+                        <span className="constraint-detail" title={c.detail}>
+                          {c.detail}
                         </span>
-                      )}
-                      <span className="layer-id">{row.id.slice(0, 8)}</span>
+                        <span className="strength-chip">{c.meta.split(' · ')[1]}</span>
+                        {c.dropped && <span className="dropped-chip">dropped</span>}
+                        <button
+                          className="icon-btn"
+                          title={c.enabled ? 'Disable (park the rule)' : 'Enable'}
+                          onClick={() => runToggleConstraint(c.id, !c.enabled)}
+                        >
+                          {c.enabled ? '⏸' : '▶'}
+                        </button>
+                        <button
+                          className="icon-btn"
+                          data-testid={`remove-constraint-${c.id}`}
+                          title="Remove"
+                          onClick={() =>
+                            runConstraint('Remove constraint', removeConstraint(c.id))
+                          }
+                        >
+                          ✕
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+          </> },
+          { id: 'operations', label: 'Pathfinder', icon: CombineIcon, content: <>
+              <section className="panel">
+                <h2>
+                  Operations{' '}
+                  <span className="sub" data-testid="operation-count">
+                    {operations.length}
+                  </span>
+                </h2>
+                <p className="empty" data-testid="operation-hint">
+                  {pairReady
+                    ? `${selected[0].name} ${'is the left operand'} — Subtract removes ${selected[1].name} from it`
+                    : selected.length === 1
+                      ? `Modify ${selected[0].name}, or click a second layer for a boolean`
+                      : 'Click two Layers rows for a boolean, or one for a modifier.'}
+                </p>
+                <div className="btn-row">
+                  <button
+                    data-testid="op-union"
+                    disabled={!ready || !pairReady}
+                    title="Union of the two selected sources"
+                    onClick={() => runBoolean('union')}
+                  >
+                    Union
+                  </button>
+                  <button
+                    data-testid="op-subtract"
+                    disabled={!ready || !pairReady}
+                    title="Remove the second source from the first"
+                    onClick={() => runBoolean('subtract')}
+                  >
+                    Subtract
+                  </button>
+                  <button
+                    data-testid="op-intersect"
+                    disabled={!ready || !pairReady}
+                    title="Keep only the overlap"
+                    onClick={() => runBoolean('intersect')}
+                  >
+                    Intersect
+                  </button>
+                  <button
+                    data-testid="op-exclude"
+                    disabled={!ready || !pairReady}
+                    title="Keep the symmetric difference"
+                    onClick={() => runBoolean('exclude')}
+                  >
+                    Exclude
+                  </button>
+                </div>
+                <div className="btn-row">
+                  <label className="field-inline">
+                    <span>value</span>
+                    <input
+                      type="number"
+                      step={0.5}
+                      value={modValue}
+                      disabled={!ready}
+                      onChange={(e) => setModValue(e.target.value)}
+                      aria-label="Modifier operand"
+                      data-testid="op-value"
+                    />
+                  </label>
+                  <button
+                    data-testid="op-offset"
+                    disabled={!ready || selected.length !== 1}
+                    title="Offset the selected source's outline by the value"
+                    onClick={() => runModifier('offset')}
+                  >
+                    Offset
+                  </button>
+                  <button
+                    data-testid="op-fillet"
+                    disabled={!ready || selected.length !== 1}
+                    title="Round the selected source's corners to the value"
+                    onClick={() => runModifier('fillet')}
+                  >
+                    Fillet
+                  </button>
+                  <button
+                    data-testid="op-mirror"
+                    disabled={!ready || selected.length !== 1}
+                    title="Reflect the selected source across the value on x"
+                    onClick={() => runModifier('mirror')}
+                  >
+                    Mirror
+                  </button>
+                </div>
+                {operations.length === 0 ? (
+                  <p className="empty">
+                    No operations. Sources stay exactly as authored — an operation is a virtual
+                    result computed from them.
+                  </p>
+                ) : (
+                  <ul className="ops" data-testid="operations">
+                    {operations.map((op) => (
+                      <li
+                        key={op.id}
+                        data-testid={`operation-${op.id}`}
+                        className={[
+                          'op-row',
+                          dirtySet.has(op.id) ? 'layer-dirty' : '',
+                          op.enabled ? '' : 'op-parked',
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                      >
+                        <span className="kind-tag">{op.kind}</span>
+                        <span className="op-desc" title={`${op.kind} over ${op.inputs.length} source(s)`}>
+                          {op.glyph} {op.description}
+                        </span>
+                        <span className="op-operands">{op.operands}</span>
+                        <span className="layer-id">{op.id.slice(0, 8)}</span>
+                        <label className="op-toggle" title={op.enabled ? 'Park' : 'Enable'}>
+                          <input
+                            type="checkbox"
+                            checked={op.enabled}
+                            onChange={(e) => runToggleOperation(op.id, e.target.checked, op.name)}
+                            aria-label={`Enable ${op.name}`}
+                          />
+                        </label>
+                        <button
+                          className="icon-btn"
+                          title={`Remove ${op.name}`}
+                          onClick={() => runRemoveOperation(op.id, op.name)}
+                        >
+                          ✕
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+          </> },
+          { id: 'generators', label: 'Generators', icon: WorkflowIcon, content: <>
+              <section className="panel">
+                <h2>
+                  Procedural{' '}
+                  <span className="sub" data-testid="procedural-count">
+                    {proceduralRowsView.length}
+                  </span>
+                </h2>
+                <p className="empty" data-testid="procedural-summary">
+                  {proceduralLine}
+                </p>
+                <div className="btn-row">
+                  <label className="field-inline">
+                    <span>kind</span>
+                    <select
+                      value={procKind}
+                      disabled={!ready}
+                      onChange={(e) => setProcKind(e.target.value)}
+                      aria-label="Procedural kind"
+                      data-testid="proc-kind"
+                    >
+                      {palette.map((option) => (
+                        <option key={option.tag} value={option.tag}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {procOption?.needs_subject ? (
+                    <label className="field-inline">
+                      <span>reads</span>
+                      <select
+                        value={procSubject}
+                        disabled={!ready}
+                        onChange={(e) => setProcSubject(e.target.value)}
+                        aria-label="Source subject"
+                        data-testid="proc-subject"
+                      >
+                        <option value="">— pick a layer —</option>
+                        {layers.map((id) => (
+                          <option key={id} value={id}>
+                            {snapshot?.scene.nodes[id]?.name ?? id.slice(0, 8)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  <button
+                    data-testid="proc-add"
+                    disabled={!ready || !procOption}
+                    title="Add the selected kind as a node"
+                    onClick={runAddProceduralNode}
+                  >
+                    Add node
+                  </button>
+                </div>
+                {proceduralRowsView.length === 0 ? (
+                  <p className="empty">
+                    No nodes. A procedural node is live geometry: a grid, a repeat, a
+                    noise field or a smoother, wired from a layer and composed into the
+                    scene like any authored shape.
+                  </p>
+                ) : (
+                  <ul className="ops procedural" data-testid="procedural">
+                    {proceduralRowsView.map((row) => (
+                      <li
+                        key={row.id}
+                        data-testid={`proc-${row.id}`}
+                        className={[
+                          'op-row',
+                          'proc-row',
+                          row.enabled ? '' : 'op-parked',
+                          proceduralDirty(row.id) ? 'layer-dirty' : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                      >
+                        <div className="proc-head">
+                          <span className="kind-tag">{row.kind}</span>
+                          <span className="op-desc" title={row.description}>
+                            {row.name}
+                          </span>
+                          <span className="op-operands">{row.description}</span>
+                          <span className="layer-id">{row.short}</span>
+                          <label className="op-toggle" title={row.enabled ? 'Park' : 'Re-arm'}>
+                            <input
+                              type="checkbox"
+                              checked={row.enabled}
+                              onChange={(e) => runToggleProcedural(row.id, e.target.checked, row.name)}
+                              aria-label={`Enable ${row.name}`}
+                            />
+                          </label>
+                          <button
+                            className="icon-btn"
+                            title={`Remove ${row.name}`}
+                            onClick={() => runRemoveProcedural(row.id, row.name)}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                        <div className="proc-ports" data-testid={`proc-ports-${row.id}`}>
+                          {row.outputs
+                            .map((port) => `${port.port} → ${port.value ?? '—'}`)
+                            .join(' · ')}
+                        </div>
+                        {row.inputs.length > 0 || row.operands.length > 0 ? (
+                          <div className="proc-controls">
+                            {row.inputs.map((input) => (
+                              <div className="proc-control" key={input.port}>
+                                <span className="proc-port" title={`${input.ty} input`}>
+                                  {input.port}
+                                  {input.required ? ' *' : ''}
+                                  {input.wired ? ' ✓' : ''}
+                                </span>
+                                <select
+                                  value={procWiring[`${row.id}:${input.port}`] ?? ''}
+                                  disabled={!ready}
+                                  onChange={(e) =>
+                                    setProcWiring((prev) => ({
+                                      ...prev,
+                                      [`${row.id}:${input.port}`]: e.target.value,
+                                    }))
+                                  }
+                                  aria-label={`${row.name} ${input.port} source`}
+                                  data-testid={`proc-wire-${row.id}-${input.port}`}
+                                >
+                                  <option value="">— source port —</option>
+                                  {proceduralPorts
+                                    .filter((option) => option.nodeId !== row.id)
+                                    .map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label} ({option.ty})
+                                      </option>
+                                    ))}
+                                </select>
+                                <button
+                                  disabled={!ready}
+                                  title={`Wire ${input.port}`}
+                                  onClick={() =>
+                                    runConnectProcedural(
+                                      row.id,
+                                      input.port,
+                                      procWiring[`${row.id}:${input.port}`] ?? '',
+                                      row.name,
+                                    )
+                                  }
+                                >
+                                  Wire
+                                </button>
+                                {input.wired ? (
+                                  <button
+                                    className="icon-btn"
+                                    title={`Unwire ${input.port}`}
+                                    onClick={() => runDisconnectProcedural(row.id, input.port, row.name)}
+                                  >
+                                    ⨯
+                                  </button>
+                                ) : null}
+                              </div>
+                            ))}
+                            {row.operands.map((operand) => (
+                              <div className="proc-control" key={operand.port}>
+                                <span
+                                  className="proc-port"
+                                  title={`${operand.ty} operand — now ${operand.text}`}
+                                >
+                                  {operand.port} = {operand.text}
+                                </span>
+                                <input
+                                  className="proc-input"
+                                  value={procOperands[`${row.id}:${operand.port}`] ?? ''}
+                                  placeholder={operand.ty === 'point' ? 'x, y' : 'value'}
+                                  disabled={!ready}
+                                  onChange={(e) =>
+                                    setProcOperands((prev) => ({
+                                      ...prev,
+                                      [`${row.id}:${operand.port}`]: e.target.value,
+                                    }))
+                                  }
+                                  aria-label={`${row.name} ${operand.port} value`}
+                                  data-testid={`proc-operand-${row.id}-${operand.port}`}
+                                />
+                                <button
+                                  disabled={!ready}
+                                  title={`Set ${operand.port}`}
+                                  onClick={() =>
+                                    runSetProceduralOperand(row.id, operand.port, operand.ty, row.name)
+                                  }
+                                >
+                                  Set
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {procedural && procedural.diagnostics.length > 0 ? (
+                  <ul className="proc-diagnostics" data-testid="procedural-diagnostics">
+                    {procedural.diagnostics.map((note, index) => (
+                      <li key={`${note.code}-${index}`} title={note.code}>
+                        {note.message}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </section>
+          </> },
+          { id: 'motion', label: 'Motion', icon: FilmIcon, content: <>
+              <section className="panel">
+                <h2>
+                  Motion{' '}
+                  <span
+                    className={animating ? 'badge-live' : 'sub'}
+                    data-testid="motion-status"
+                  >
+                    {motionSummary(motion)}
+                  </span>
+                </h2>
+                <p className="empty" data-testid="motion-hint">
+                  {selected.length === 1
+                    ? `${selected[0].name}: bind a hover spring, or ramp its x with a keyframe track`
+                    : 'Select one layer to give it motion.'}
+                </p>
+                <div className="btn-row">
+                  <label className="field">
+                    <span>rest</span>
+                    <input
+                      type="number"
+                      value={hoverOff}
+                      disabled={!ready}
+                      onChange={(e) => setHoverOff(e.target.value)}
+                      aria-label="Hover rest value"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>hover</span>
+                    <input
+                      type="number"
+                      value={hoverOn}
+                      disabled={!ready}
+                      onChange={(e) => setHoverOn(e.target.value)}
+                      aria-label="Hover value"
+                    />
+                  </label>
+                </div>
+                <div className="btn-row">
+                  <button
+                    data-testid="motion-bind"
+                    disabled={!ready || selected.length !== 1}
+                    title="Bind a spring that eases toward the hover value while the pointer is over the shape"
+                    onClick={runBindHover}
+                  >
+                    Bind hover spring
+                  </button>
+                  <label className="check" title="Hold the hover flag by hand instead of moving the pointer">
+                    <input
+                      type="checkbox"
+                      data-testid="motion-hover"
+                      disabled={!ready || selected.length !== 1}
+                      checked={
+                        selected.length === 1 &&
+                        (motion?.states.includes(`hover:${selected[0].id}`) ?? false)
+                      }
+                      onChange={(e) => runToggleHover(e.target.checked)}
+                    />
+                    <span>hover</span>
+                  </label>
+                </div>
+                <div className="btn-row">
+                  <button
+                    data-testid="motion-track"
+                    disabled={!ready || selected.length !== 1}
+                    title="Register a three-key x ramp and bind the slot to it"
+                    onClick={runRampTrack}
+                  >
+                    Ramp x (track)
+                  </button>
+                  <button
+                    data-testid="motion-reeval"
+                    disabled={!ready}
+                    title="Rebuild the whole scene from scratch (patch ≡ rebuild)"
+                    onClick={runFullReeval}
+                  >
+                    Re-evaluate all
+                  </button>
+                </div>
+                {motion && motion.tracks.length > 0 && (
+                  <div className="chips" data-testid="motion-tracks">
+                    {motion.tracks.map((id) => (
+                      <button
+                        key={id}
+                        className="chip"
+                        title={`Remove track ${id}`}
+                        onClick={() => runRemoveTrack(id)}
+                      >
+                        ♪ {id} ✕
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {stateChips(motion).length > 0 && (
+                  <div className="chips" data-testid="motion-states">
+                    {stateChips(motion).map((chip) => (
+                      <span key={chip} className="chip">
+                        ◉ {chip}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <ul className="motion" data-testid="motion-bindings">
+                  {motionRows(motion).map((row) => (
+                    <li key={`${row.nodeId}:${row.property}`}>
+                      <span className={row.active ? 'motion-live' : 'motion-rest'}>
+                        {row.kind === 'spring' ? '≈' : row.kind === 'track' ? '♪' : '◉'}
+                      </span>
+                      <span className="motion-detail">{row.detail}</span>
+                      <span className="motion-value">{row.value}</span>
                       <button
                         className="icon-btn"
-                        title={
-                          row.isOperation
-                            ? `Remove ${row.name} (the sources stay)`
-                            : `Delete ${row.name}`
-                        }
-                        onClick={() =>
-                          row.isOperation
-                            ? runRemoveOperation(row.id, row.name)
-                            : runCommand(`DeleteNode ${row.name}`, deleteNode(row.id))
-                        }
+                        data-testid={`motion-unbind-${row.property}`}
+                        title={`Unbind ${row.property} (writes the engine's current value)`}
+                        onClick={() => runUnbind({ nodeId: row.nodeId, property: row.property })}
                       >
                         ✕
                       </button>
                     </li>
-                  );
-                })}
-              </ul>
-            )}
-          </section>
-
-          <section className="panel">
-            <h2>
-              Operations{' '}
-              <span className="sub" data-testid="operation-count">
-                {operations.length}
-              </span>
-            </h2>
-            <p className="empty" data-testid="operation-hint">
-              {pairReady
-                ? `${selected[0].name} ${'is the left operand'} — Subtract removes ${selected[1].name} from it`
-                : selected.length === 1
-                  ? `Modify ${selected[0].name}, or click a second layer for a boolean`
-                  : 'Click two Layers rows for a boolean, or one for a modifier.'}
-            </p>
-            <div className="btn-row">
-              <button
-                data-testid="op-union"
-                disabled={!ready || !pairReady}
-                title="Union of the two selected sources"
-                onClick={() => runBoolean('union')}
-              >
-                Union
-              </button>
-              <button
-                data-testid="op-subtract"
-                disabled={!ready || !pairReady}
-                title="Remove the second source from the first"
-                onClick={() => runBoolean('subtract')}
-              >
-                Subtract
-              </button>
-              <button
-                data-testid="op-intersect"
-                disabled={!ready || !pairReady}
-                title="Keep only the overlap"
-                onClick={() => runBoolean('intersect')}
-              >
-                Intersect
-              </button>
-              <button
-                data-testid="op-exclude"
-                disabled={!ready || !pairReady}
-                title="Keep the symmetric difference"
-                onClick={() => runBoolean('exclude')}
-              >
-                Exclude
-              </button>
-            </div>
-            <div className="btn-row">
-              <label className="field-inline">
-                <span>value</span>
-                <input
-                  type="number"
-                  step={0.5}
-                  value={modValue}
-                  disabled={!ready}
-                  onChange={(e) => setModValue(e.target.value)}
-                  aria-label="Modifier operand"
-                  data-testid="op-value"
-                />
-              </label>
-              <button
-                data-testid="op-offset"
-                disabled={!ready || selected.length !== 1}
-                title="Offset the selected source's outline by the value"
-                onClick={() => runModifier('offset')}
-              >
-                Offset
-              </button>
-              <button
-                data-testid="op-fillet"
-                disabled={!ready || selected.length !== 1}
-                title="Round the selected source's corners to the value"
-                onClick={() => runModifier('fillet')}
-              >
-                Fillet
-              </button>
-              <button
-                data-testid="op-mirror"
-                disabled={!ready || selected.length !== 1}
-                title="Reflect the selected source across the value on x"
-                onClick={() => runModifier('mirror')}
-              >
-                Mirror
-              </button>
-            </div>
-            {operations.length === 0 ? (
-              <p className="empty">
-                No operations. Sources stay exactly as authored — an operation is a virtual
-                result computed from them.
-              </p>
-            ) : (
-              <ul className="ops" data-testid="operations">
-                {operations.map((op) => (
-                  <li
-                    key={op.id}
-                    data-testid={`operation-${op.id}`}
-                    className={[
-                      'op-row',
-                      dirtySet.has(op.id) ? 'layer-dirty' : '',
-                      op.enabled ? '' : 'op-parked',
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
+                  ))}
+                </ul>
+              </section>
+          </> },
+          { id: 'components', label: 'Components', icon: ComponentIcon, content: <>
+              <ComponentPanel
+                component={component}
+                selectionCount={selection.length}
+                ready={ready}
+                // The probe is the client's; the sentence is the engine's own words.
+                engineIsOlder={Boolean(client?.engineIsOlder)}
+                staleSentence={VectraClient.STALE_ENGINE}
+                iconSizes={iconSizes}
+                onIconSizes={setIconSizes}
+                onCreate={makeComponent}
+                onPlaceInstance={placeInstance}
+                onGenerateIconSet={generateIconSet}
+                onSetProp={setProp}
+              />
+          </> },
+          { id: 'export', label: 'Export', icon: ShareIcon, content: <>
+              <section className="panel">
+                <h2>
+                  Export{' '}
+                  <span className="sub" data-testid="export-summary">
+                    {exportSummary(exportResult)}
+                  </span>
+                </h2>
+                <p className="empty">
+                  The engine writes the file: a semantic SVG (a circle stays a circle) or a
+                  parametric React component ({'{'}width={'{'}base * 2{'}'}{'}'}).
+                </p>
+                <div className="btn-row">
+                  <select
+                    data-testid="export-format"
+                    value={exportFormat}
+                    onChange={(event) => setExportFormat(event.target.value)}
                   >
-                    <span className="kind-tag">{op.kind}</span>
-                    <span className="op-desc" title={`${op.kind} over ${op.inputs.length} source(s)`}>
-                      {op.glyph} {op.description}
-                    </span>
-                    <span className="op-operands">{op.operands}</span>
-                    <span className="layer-id">{op.id.slice(0, 8)}</span>
-                    <label className="op-toggle" title={op.enabled ? 'Park' : 'Enable'}>
+                    <option value="svg">SVG (semantic)</option>
+                    <option value="react">React (parametric)</option>
+                  </select>
+                  <button
+                    data-testid="export-run"
+                    disabled={!ready}
+                    title="Compile the drawing to code"
+                    onClick={runExport}
+                  >
+                    Export
+                  </button>
+                </div>
+              </section>
+          </> },
+          { id: 'assistant', label: 'Assistant', icon: SparklesIcon, content: <>
+              <section className="panel ai-panel" data-testid="ai-panel">
+                <h2>
+                  AI Assistant{' '}
+                  <span className="sub" data-testid="ai-summary">
+                    {ai.summary}
+                  </span>
+                  <kbd className="ai-kbd">⌘K</kbd>
+                </h2>
+                <p className="empty">
+                  Describe an edit in words. The AI answers with JSON commands — the same
+                  commands the buttons above send — shows them, and runs them only when you
+                  say so. It never draws: every command goes through the engine's own
+                  validation, and a refusal is fed back for a correction.
+                </p>
+                <div className="btn-row">
+                  <input
+                    ref={aiPromptRef}
+                    data-testid="ai-prompt"
+                    className="ai-input"
+                    value={aiText}
+                    placeholder="round the corners of card by 8"
+                    onChange={(event) => setAiText(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        aiGenerate();
+                      }
+                    }}
+                  />
+                  <button
+                    data-testid="ai-generate"
+                    disabled={!ready}
+                    title="Ask for commands and show them (nothing is applied)"
+                    onClick={aiGenerate}
+                  >
+                    Generate
+                  </button>
+                  <button
+                    data-testid="ai-execute"
+                    disabled={!ready || ai.plan.length === 0}
+                    title="Run the previewed plan exactly as shown"
+                    onClick={() => aiExecute(false)}
+                  >
+                    Execute
+                  </button>
+                  <button
+                    data-testid="ai-autocorrect"
+                    disabled={!ready}
+                    title="Generate, validate, feed the error back, retry up to twice"
+                    onClick={() => aiExecute(true)}
+                  >
+                    Auto-correct
+                  </button>
+                </div>
+                {aiPhrasings.length ? (
+                  <p className="ai-hint-line" data-testid="ai-phrasings">
+                    understands: {aiPhrasings.join(' · ')}
+                  </p>
+                ) : null}
+                {ai.prose ? (
+                  <p className="magic-prose" data-testid="ai-prose">
+                    {ai.prose}
+                  </p>
+                ) : null}
+                {ai.plan.length ? (
+                  /* RULE 4: the plan is described in words — "Add vertical constraint",
+                     "Set width" — never as raw JSON. */
+                  <ol className="ai-plan" data-testid="ai-plan">
+                    {ai.plan.map((row) => (
+                      <li key={row.index} title={row.label}>
+                        <span className="ai-plan-index">{row.index}</span>
+                        <span className="ai-plan-tag">{row.label}</span>
+                        {row.target ? <span className="ai-plan-target">{row.target}</span> : null}
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
+                {ai.dirty.length ? (
+                  <p className="ai-hint-line" data-testid="ai-dirty">
+                    re-evaluated {ai.dirty.length} node(s): {ai.dirty.join(', ')}
+                  </p>
+                ) : null}
+                {ai.corrections.length ? (
+                  <ul className="ai-corrections" data-testid="ai-corrections">
+                    {ai.corrections.map((row, index) => (
+                      <li key={`${row.attempt}-${index}`}>
+                        <span className="ai-plan-tag">attempt {row.attempt}</span>
+                        <span className="ai-correction-code">{row.code}</span>
+                        <span>{row.error}</span>
+                        {row.note ? <em> → {row.note}</em> : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {ai.notes.length ? (
+                  <p className="ai-hint-line" data-testid="ai-notes">
+                    {ai.notes.join(' · ')}
+                  </p>
+                ) : null}
+                <div className="btn-row">
+                  <button
+                    data-testid="ai-prompt-toggle"
+                    disabled={!ready}
+                    onClick={toggleAiPrompt}
+                  >
+                    {aiShowPrompt ? 'Hide' : 'Show'} system prompt
+                  </button>
+                  <span className="sub" data-testid="ai-context">
+                    {summaryCounts(aiSummary)}
+                  </span>
+                </div>
+                {aiShowPrompt ? (
+                  <>
+                    <p className="ai-hint-line" data-testid="ai-grounding">
+                      grounded on: {summaryLabels(aiSummary).join(' · ') || 'an empty canvas'}
+                    </p>
+                    <pre className="ai-system-prompt" data-testid="ai-system-prompt">
+                      {aiPromptText}
+                    </pre>
+                  </>
+                ) : null}
+              </section>
+          </> },
+          {
+            id: 'engine',
+            label: 'Engine',
+            icon: BeakerIcon,
+            dev: true,
+            content: (
+              <>
+                <section className="panel" data-testid="engine-controls">
+                  <h2>Engine</h2>
+                  <div className="btn-row">
+                    <button
+                      data-testid="force-full-reeval"
+                      disabled={!ready}
+                      title="Rebuild the whole scene — the incremental result must be identical"
+                      onClick={runFullReeval}
+                    >
+                      Rebuild everything
+                    </button>
+                    <label className="time-row">
+                      <span>time {(snapshot?.time ?? 0).toFixed(1)}s</span>
                       <input
-                        type="checkbox"
-                        checked={op.enabled}
-                        onChange={(e) => runToggleOperation(op.id, e.target.checked, op.name)}
-                        aria-label={`Enable ${op.name}`}
+                        type="range"
+                        min={0}
+                        max={10}
+                        step={0.1}
+                        value={snapshot?.time ?? 0}
+                        disabled={!ready}
+                        onChange={(e) => runSetTime(Number(e.target.value))}
+                        aria-label="Engine time"
                       />
                     </label>
-                    <button
-                      className="icon-btn"
-                      title={`Remove ${op.name}`}
-                      onClick={() => runRemoveOperation(op.id, op.name)}
-                    >
-                      ✕
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="panel">
-            <h2>
-              Procedural{' '}
-              <span className="sub" data-testid="procedural-count">
-                {proceduralRowsView.length}
-              </span>
-            </h2>
-            <p className="empty" data-testid="procedural-summary">
-              {proceduralLine}
-            </p>
-            <div className="btn-row">
-              <label className="field-inline">
-                <span>kind</span>
-                <select
-                  value={procKind}
-                  disabled={!ready}
-                  onChange={(e) => setProcKind(e.target.value)}
-                  aria-label="Procedural kind"
-                  data-testid="proc-kind"
-                >
-                  {palette.map((option) => (
-                    <option key={option.tag} value={option.tag}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {procOption?.needs_subject ? (
-                <label className="field-inline">
-                  <span>reads</span>
-                  <select
-                    value={procSubject}
-                    disabled={!ready}
-                    onChange={(e) => setProcSubject(e.target.value)}
-                    aria-label="Source subject"
-                    data-testid="proc-subject"
-                  >
-                    <option value="">— pick a layer —</option>
-                    {layers.map((id) => (
-                      <option key={id} value={id}>
-                        {snapshot?.scene.nodes[id]?.name ?? id.slice(0, 8)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
-              <button
-                data-testid="proc-add"
-                disabled={!ready || !procOption}
-                title="Add the selected kind as a node"
-                onClick={runAddProceduralNode}
-              >
-                Add node
-              </button>
-            </div>
-            {proceduralRowsView.length === 0 ? (
-              <p className="empty">
-                No nodes. A procedural node is live geometry: a grid, a repeat, a
-                noise field or a smoother, wired from a layer and composed into the
-                scene like any authored shape.
-              </p>
-            ) : (
-              <ul className="ops procedural" data-testid="procedural">
-                {proceduralRowsView.map((row) => (
-                  <li
-                    key={row.id}
-                    data-testid={`proc-${row.id}`}
-                    className={[
-                      'op-row',
-                      'proc-row',
-                      row.enabled ? '' : 'op-parked',
-                      proceduralDirty(row.id) ? 'layer-dirty' : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
-                  >
-                    <div className="proc-head">
-                      <span className="kind-tag">{row.kind}</span>
-                      <span className="op-desc" title={row.description}>
-                        {row.name}
-                      </span>
-                      <span className="op-operands">{row.description}</span>
-                      <span className="layer-id">{row.short}</span>
-                      <label className="op-toggle" title={row.enabled ? 'Park' : 'Re-arm'}>
-                        <input
-                          type="checkbox"
-                          checked={row.enabled}
-                          onChange={(e) => runToggleProcedural(row.id, e.target.checked, row.name)}
-                          aria-label={`Enable ${row.name}`}
-                        />
-                      </label>
-                      <button
-                        className="icon-btn"
-                        title={`Remove ${row.name}`}
-                        onClick={() => runRemoveProcedural(row.id, row.name)}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                    <div className="proc-ports" data-testid={`proc-ports-${row.id}`}>
-                      {row.outputs
-                        .map((port) => `${port.port} → ${port.value ?? '—'}`)
-                        .join(' · ')}
-                    </div>
-                    {row.inputs.length > 0 || row.operands.length > 0 ? (
-                      <div className="proc-controls">
-                        {row.inputs.map((input) => (
-                          <div className="proc-control" key={input.port}>
-                            <span className="proc-port" title={`${input.ty} input`}>
-                              {input.port}
-                              {input.required ? ' *' : ''}
-                              {input.wired ? ' ✓' : ''}
-                            </span>
-                            <select
-                              value={procWiring[`${row.id}:${input.port}`] ?? ''}
-                              disabled={!ready}
-                              onChange={(e) =>
-                                setProcWiring((prev) => ({
-                                  ...prev,
-                                  [`${row.id}:${input.port}`]: e.target.value,
-                                }))
-                              }
-                              aria-label={`${row.name} ${input.port} source`}
-                              data-testid={`proc-wire-${row.id}-${input.port}`}
-                            >
-                              <option value="">— source port —</option>
-                              {proceduralPorts
-                                .filter((option) => option.nodeId !== row.id)
-                                .map((option) => (
-                                  <option key={option.value} value={option.value}>
-                                    {option.label} ({option.ty})
-                                  </option>
-                                ))}
-                            </select>
-                            <button
-                              disabled={!ready}
-                              title={`Wire ${input.port}`}
-                              onClick={() =>
-                                runConnectProcedural(
-                                  row.id,
-                                  input.port,
-                                  procWiring[`${row.id}:${input.port}`] ?? '',
-                                  row.name,
-                                )
-                              }
-                            >
-                              Wire
-                            </button>
-                            {input.wired ? (
-                              <button
-                                className="icon-btn"
-                                title={`Unwire ${input.port}`}
-                                onClick={() => runDisconnectProcedural(row.id, input.port, row.name)}
-                              >
-                                ⨯
-                              </button>
-                            ) : null}
-                          </div>
-                        ))}
-                        {row.operands.map((operand) => (
-                          <div className="proc-control" key={operand.port}>
-                            <span
-                              className="proc-port"
-                              title={`${operand.ty} operand — now ${operand.text}`}
-                            >
-                              {operand.port} = {operand.text}
-                            </span>
-                            <input
-                              className="proc-input"
-                              value={procOperands[`${row.id}:${operand.port}`] ?? ''}
-                              placeholder={operand.ty === 'point' ? 'x, y' : 'value'}
-                              disabled={!ready}
-                              onChange={(e) =>
-                                setProcOperands((prev) => ({
-                                  ...prev,
-                                  [`${row.id}:${operand.port}`]: e.target.value,
-                                }))
-                              }
-                              aria-label={`${row.name} ${operand.port} value`}
-                              data-testid={`proc-operand-${row.id}-${operand.port}`}
-                            />
-                            <button
-                              disabled={!ready}
-                              title={`Set ${operand.port}`}
-                              onClick={() =>
-                                runSetProceduralOperand(row.id, operand.port, operand.ty, row.name)
-                              }
-                            >
-                              Set
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {procedural && procedural.diagnostics.length > 0 ? (
-              <ul className="proc-diagnostics" data-testid="procedural-diagnostics">
-                {procedural.diagnostics.map((note, index) => (
-                  <li key={`${note.code}-${index}`} title={note.code}>
-                    {note.message}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </section>
-
-          <section className="panel">
-            <h2>
-              Constraints{' '}
-              <span className="sub">
-                {constraints.length} · {solverLine}
-              </span>
-            </h2>
-            <p className="empty" data-testid="constraint-hint">
-              {pairReady
-                ? `Constrain ${selected[0].name} ↔ ${selected[1].name} (${selected[0].name} is the anchor)`
-                : 'Click two Layers rows to pick a pair.'}
-            </p>
-            <div className="btn-row">
-              <button
-                data-testid="add-vertical-constraint"
-                disabled={!ready || !pairReady}
-                title="Enforce x(node₂) == x(node₁)"
-                onClick={runAddVertical}
-              >
-                Vertical
-              </button>
-              <button
-                data-testid="add-coincident-constraint"
-                disabled={!ready || !pairReady}
-                title="Two rules: the centres coincide on both axes"
-                onClick={runAddCoincident}
-              >
-                Coincident
-              </button>
-              <button
-                data-testid="add-distance-constraint"
-                disabled={!ready || !pairReady}
-                title="Capture the current separation on x and hold it"
-                onClick={() => runAddDistance()}
-              >
-                Hold distance
-              </button>
-              <button
-                data-testid="over-constrain"
-                disabled={!ready || constraints.length === 0}
-                title="Add the same separation at +100, weakly: the engine drops the weaker rule and logs a diagnostic"
-                onClick={runOverConstrain}
-              >
-                Over-constrain
-              </button>
-            </div>
-            {constraints.length === 0 ? (
-              <p className="empty">No constraints yet — the solver is idle.</p>
-            ) : (
-              <ul className="constraints" data-testid="constraint-list">
-                {constraints.map((c) => (
-                  <li
-                    key={c.id}
-                    data-testid={`constraint-${c.id}`}
-                    className={c.dropped ? 'constraint-dropped' : ''}
-                  >
-                    <span className="kind-tag">{c.kind}</span>
-                    <span className="constraint-detail" title={c.detail}>
-                      {c.detail}
+                  </div>
+                </section>
+                <section className="panel deps-panel">
+                  <h2>
+                    Dependencies{' '}
+                    <span className="sub">
+                      {graphSummary
+                        ? `${graphSummary.nodes} vertices · ${graphSummary.edges} edges · ${
+                            graphSummary.acyclic ? 'acyclic ✓' : 'CYCLIC ✗'
+                          }`
+                        : 'engine graph'}
                     </span>
-                    <span className="strength-chip">{c.meta.split(' · ')[1]}</span>
-                    {c.dropped && <span className="dropped-chip">dropped</span>}
-                    <button
-                      className="icon-btn"
-                      title={c.enabled ? 'Disable (park the rule)' : 'Enable'}
-                      onClick={() => runToggleConstraint(c.id, !c.enabled)}
-                    >
-                      {c.enabled ? '⏸' : '▶'}
-                    </button>
-                    <button
-                      className="icon-btn"
-                      data-testid={`remove-constraint-${c.id}`}
-                      title="Remove"
-                      onClick={() =>
-                        runConstraint('Remove constraint', removeConstraint(c.id))
-                      }
-                    >
-                      ✕
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+                  </h2>
+                  {depRows.length === 0 ? (
+                    <p className="empty">
+                      No dependencies yet — add a “⛓ Rect ← $base” or bind a parameter to
+                      see edges appear.
+                    </p>
+                  ) : (
+                    <ul className="deps" data-testid="dependencies">
+                      {depRows.map((e) => (
+                        <li key={`${e.fromKey}->${e.toKey}`}>
+                          <span className="dep-from">{e.from}</span>
+                          <span className="dep-arrow">→ depends on →</span>
+                          <span className="dep-to">{e.to}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+                <section className="panel log-panel">
+                  <h2>
+                    Activity <span className="sub">what the engine did, in order</span>
+                  </h2>
+                  <div className="log" ref={logRef} data-testid="event-log">
+                    {log.map((e) => (
+                      <div key={e.seq} className={`log-line log-${e.kind}`}>
+                        <span className="log-seq">{e.seq}</span>
+                        <span>{e.text}</span>
+                        {e.detail && devMode ? (
+                          <code className="log-json">{e.detail}</code>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </>
+            ),
+          },
+        ]}
+      />
 
-          <section className="panel">
-            <h2>Variables <span className="sub">{variables.length}</span></h2>
-            {variables.length === 0 ? (
-              <p className="empty">No variables yet.</p>
-            ) : (
-              <ul className="vars" data-testid="variables">
-                {variables.map(([name, value]) => (
-                  <li key={name}>
-                    <span className="var-name">${name}</span>
-                    <span className="var-value">{value}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="var-form">
-              <input
-                value={varName}
-                onChange={(e) => setVarName(e.target.value)}
-                placeholder="name"
-                aria-label="Variable name"
-              />
-              <input
-                value={varValue}
-                onChange={(e) => setVarValue(e.target.value)}
-                placeholder="value"
-                inputMode="decimal"
-                aria-label="Variable value"
-              />
-              <button data-testid="set-variable" disabled={!ready} onClick={runSetVariable}>
-                Set
-              </button>
-            </div>
-          </section>
-
-          <section className="panel">
-            <h2>Expressions <span className="sub">ƒx · {expressions.length}</span></h2>
-            {expressions.length === 0 ? (
-              <p className="empty">No expressions yet.</p>
-            ) : (
-              <ul className="vars" data-testid="expressions">
-                {expressions.map(([id, source]) => (
-                  <li key={id}>
-                    <span className="layer-id">{id.slice(0, 8)}</span>
-                    <span className="var-name">{source}</span>
-                    <button
-                      className="icon-btn"
-                      title={`Remove ${source}`}
-                      onClick={() =>
-                        runCommand(`RemoveExpression ${source}`, removeExpression(id))
-                      }
-                    >
-                      ✕
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="var-form">
-              <input
-                value={exprSource}
-                onChange={(e) => setExprSource(e.target.value)}
-                placeholder="$base * 2 + 10"
-                aria-label="Expression source"
-                data-testid="expression-source"
-              />
-              <button
-                data-testid="define-expression"
-                disabled={!ready}
-                onClick={runDefineExpression}
-              >
-                ƒx Define
-              </button>
-            </div>
-          </section>
-            </>
-          )}
-        </aside>
-
-        {showsMathPanels(draw.tool) && (
-        <div className="bottom">
-        <section className="panel deps-panel">
-          <h2>
-            Dependencies{' '}
-            <span className="sub">
-              {graphSummary
-                ? `${graphSummary.nodes} vertices · ${graphSummary.edges} edges · ${
-                    graphSummary.acyclic ? 'acyclic ✓' : 'CYCLIC ✗'
-                  }`
-                : 'engine graph'}
-            </span>
-          </h2>
-          {depRows.length === 0 ? (
-            <p className="empty">
-              No dependencies yet — add a “⛓ Rect ← $base” or bind a parameter to
-              see edges appear.
-            </p>
-          ) : (
-            <ul className="deps" data-testid="dependencies">
-              {depRows.map((e) => (
-                <li key={`${e.fromKey}->${e.toKey}`}>
-                  <span className="dep-from">{e.from}</span>
-                  <span className="dep-arrow">→ depends on →</span>
-                  <span className="dep-to">{e.to}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        <section className="panel log-panel">
-          <h2>Engine events <span className="sub">command → events round-trip</span></h2>
-          <div className="log" ref={logRef} data-testid="event-log">
-            {log.map((e) => (
-              <div key={e.seq} className={`log-line log-${e.kind}`}>
-                <span className="log-seq">{e.seq}</span>
-                <span>{e.text}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel ai-panel" data-testid="ai-panel">
-          <h2>
-            AI Assistant{' '}
-            <span className="sub" data-testid="ai-summary">
-              {ai.summary}
-            </span>
-            <kbd className="ai-kbd">⌘K</kbd>
-          </h2>
-          <p className="empty">
-            Describe an edit in words. The AI answers with JSON commands — the same
-            commands the buttons above send — shows them, and runs them only when you
-            say so. It never draws: every command goes through the engine's own
-            validation, and a refusal is fed back for a correction.
-          </p>
-          <div className="btn-row">
-            <input
-              ref={aiPromptRef}
-              data-testid="ai-prompt"
-              className="ai-input"
-              value={aiText}
-              placeholder="round the corners of card by 8"
-              onChange={(event) => setAiText(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  aiGenerate();
-                }
-              }}
-            />
-            <button
-              data-testid="ai-generate"
-              disabled={!ready}
-              title="Ask for commands and show them (nothing is applied)"
-              onClick={aiGenerate}
-            >
-              Generate
-            </button>
-            <button
-              data-testid="ai-execute"
-              disabled={!ready || ai.plan.length === 0}
-              title="Run the previewed plan exactly as shown"
-              onClick={() => aiExecute(false)}
-            >
-              Execute
-            </button>
-            <button
-              data-testid="ai-autocorrect"
-              disabled={!ready}
-              title="Generate, validate, feed the error back, retry up to twice"
-              onClick={() => aiExecute(true)}
-            >
-              Auto-correct
-            </button>
-          </div>
-          {aiPhrasings.length ? (
-            <p className="ai-hint-line" data-testid="ai-phrasings">
-              understands: {aiPhrasings.join(' · ')}
-            </p>
-          ) : null}
-          {ai.prose ? (
-            <p className="magic-prose" data-testid="ai-prose">
-              {ai.prose}
-            </p>
-          ) : null}
-          {ai.plan.length ? (
-            /* RULE 4: the plan is described in words — "Add vertical constraint",
-               "Set width" — never as raw JSON. */
-            <ol className="ai-plan" data-testid="ai-plan">
-              {ai.plan.map((row) => (
-                <li key={row.index} title={row.label}>
-                  <span className="ai-plan-index">{row.index}</span>
-                  <span className="ai-plan-tag">{row.label}</span>
-                  {row.target ? <span className="ai-plan-target">{row.target}</span> : null}
-                </li>
-              ))}
-            </ol>
-          ) : null}
-          {ai.dirty.length ? (
-            <p className="ai-hint-line" data-testid="ai-dirty">
-              re-evaluated {ai.dirty.length} node(s): {ai.dirty.join(', ')}
-            </p>
-          ) : null}
-          {ai.corrections.length ? (
-            <ul className="ai-corrections" data-testid="ai-corrections">
-              {ai.corrections.map((row, index) => (
-                <li key={`${row.attempt}-${index}`}>
-                  <span className="ai-plan-tag">attempt {row.attempt}</span>
-                  <span className="ai-correction-code">{row.code}</span>
-                  <span>{row.error}</span>
-                  {row.note ? <em> → {row.note}</em> : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {ai.notes.length ? (
-            <p className="ai-hint-line" data-testid="ai-notes">
-              {ai.notes.join(' · ')}
-            </p>
-          ) : null}
-          <div className="btn-row">
-            <button
-              data-testid="ai-prompt-toggle"
-              disabled={!ready}
-              onClick={toggleAiPrompt}
-            >
-              {aiShowPrompt ? 'Hide' : 'Show'} system prompt
-            </button>
-            <span className="sub" data-testid="ai-context">
-              {summaryCounts(aiSummary)}
-            </span>
-          </div>
-          {aiShowPrompt ? (
-            <>
-              <p className="ai-hint-line" data-testid="ai-grounding">
-                grounded on: {summaryLabels(aiSummary).join(' · ') || 'an empty canvas'}
-              </p>
-              <pre className="ai-system-prompt" data-testid="ai-system-prompt">
-                {aiPromptText}
-              </pre>
-            </>
-          ) : null}
-        </section>
-
-        {/* ── Task 10.6 RULE 1: the Smart Component inspector ─────────────── */}
-        <ComponentPanel
-          component={component}
-          selectionCount={selection.length}
-          ready={ready}
-          // The probe is the client's; the sentence is the engine's own words.
-          engineIsOlder={Boolean(client?.engineIsOlder)}
-          staleSentence={VectraClient.STALE_ENGINE}
-          iconSizes={iconSizes}
-          onIconSizes={setIconSizes}
-          onCreate={makeComponent}
-          onPlaceInstance={placeInstance}
-          onGenerateIconSet={generateIconSet}
-          onSetProp={setProp}
-        />
-
-        <section className="panel">
-          <h2>
-            Export{' '}
-            <span className="sub" data-testid="export-summary">
-              {exportSummary(exportResult)}
-            </span>
-          </h2>
-          <p className="empty">
-            The engine writes the file: a semantic SVG (a circle stays a circle) or a
-            parametric React component ({'{'}width={'{'}base * 2{'}'}{'}'}).
-          </p>
-          <div className="btn-row">
-            <select
-              data-testid="export-format"
-              value={exportFormat}
-              onChange={(event) => setExportFormat(event.target.value)}
-            >
-              <option value="svg">SVG (semantic)</option>
-              <option value="react">React (parametric)</option>
-            </select>
-            <button
-              data-testid="export-run"
-              disabled={!ready}
-              title="Compile the drawing to code"
-              onClick={runExport}
-            >
-              Export
-            </button>
-          </div>
-        </section>
-        </div>
-        )}
-      </main>
+      {/* ── Focus mode's edge reveal (RULE 3) ───────────────────────────── */}
+      {focusMode && (
+        <>
+          <span className="focus-edge focus-left" aria-hidden="true" data-testid="focus-edge-left" />
+          <span className="focus-edge focus-right" aria-hidden="true" data-testid="focus-edge-right" />
+          {/* `edgeReveal` wakes the chrome from any of the four edges, so all
+              four wear their affordance — the top bar holds Save and the bottom
+              bar holds Undo, and reaching for either should not require leaving
+              focus mode by hand. */}
+          <span className="focus-edge focus-top" aria-hidden="true" data-testid="focus-edge-top" />
+          <span
+            className="focus-edge focus-bottom"
+            aria-hidden="true"
+            data-testid="focus-edge-bottom"
+          />
+        </>
+      )}
 
       {exportResult ? (
         <div className="export-modal" data-testid="export-modal" role="dialog">
@@ -4172,11 +4674,14 @@ export default function App() {
               </strong>
               <span className="sub">{exportResult.warnings.length} warning(s)</span>
               <button
+                type="button"
+                className="icon"
                 data-testid="export-close"
-                onClick={() => setExportResult(null)}
                 title="Close"
+                aria-label="Close the export"
+                onClick={() => setExportResult(null)}
               >
-                ✕
+                <CloseIcon size={15} strokeWidth={2} aria-hidden="true" />
               </button>
             </header>
             {exportResult.warnings.length ? (
@@ -4195,7 +4700,7 @@ export default function App() {
                 disabled={exportResult.status !== 'ok' || !exportResult.code}
                 onClick={() => void copyExport()}
               >
-                Copy to Clipboard
+                Copy
               </button>
               <span className="sub">
                 {exportResult.status === 'ok'
@@ -4207,7 +4712,7 @@ export default function App() {
         </div>
       ) : null}
 
-      {/* ── Task 10.7 RULE 4: the colour in flight ────────────────────── */}
+      {/* ── The colour in flight (drag a swatch onto a shape) ───────────── */}
       {dropPos && (
         <div
           className="colordrop-ghost"
@@ -4216,7 +4721,6 @@ export default function App() {
         />
       )}
 
-      {/* ── Task 10.6 RULE 2 + RULE 4: Make Magic (⌘K) ──────────────────── */}
       <MagicBar
         open={magicOpen}
         ready={ready}

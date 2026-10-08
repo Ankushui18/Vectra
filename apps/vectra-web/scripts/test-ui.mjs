@@ -45,6 +45,13 @@ await build({
   format: 'esm',
   outExtension: { '.js': '.mjs' },
   external: ['react', 'react-dom', 'react-dom/server'],
+  // `lucide-react` ships CJS *and* ESM. esbuild's Node platform default prefers
+  // `main` (the CJS build), and a CJS build bundled into an ESM output does a
+  // dynamic `require('react')` — which Node's ESM loader refuses. Preferring
+  // `module` picks the ESM build, which imports React the way the output
+  // expects: the icon set then bundles and SSR-renders like every other
+  // component (Task 13.0 RULE 5).
+  mainFields: ['module', 'main'],
   loader: { '.tsx': 'tsx' },
   plugins: [
     {

@@ -1,17 +1,35 @@
 /* VECTRA remote — minimal dark console theme. No external assets. */
 
 :root {
-  --bg: #0d1117;
-  --panel: #161b22;
-  --panel-2: #1d242e;
-  --border: #2d333b;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #2f81f7;
-  --green: #3fb950;
-  --amber: #d29922;
-  --red: #f85149;
+  /* **Task 13.0 RULE 5: the professional dark theme.**
+
+     These are the *same numbers* as `THEME` in `src/engine/theme.ts` — the CSS
+     variables and the TypeScript constant are one palette with two consumers
+     (the stylesheet, and the swatch code that has to hand a colour to a command
+     or an SVG). Change one, change the other; the audit's "documentation drift"
+     starts exactly here, so the pair is called out in both files.
+
+     The five greys are named for what they *are* rather than where they are
+     used: the same `#252526` is the hover state of a dock button, a panel row
+     and a bottom-bar control. */
+  --canvas: #121212;      /* the canvas, and the canvas only */
+  --panel: #1e1e1e;       /* every panel, bar and drawer */
+  --hover: #252526;       /* the one hover/raised surface */
+  --border: #3e3e42;      /* every keyline */
+  --text: #e0e0e0;        /* primary type */
+  --muted: #a0a0a0;       /* secondary type, units, hints */
+  --accent: #4f8cff;      /* selection — nothing else */
+  --danger: #e5534b;      /* destructive */
+  --green: #7ee0a8;
+  --amber: #ffd479;
+  --red: #e5534b;
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+
+  /* The Task 10.x names, kept as aliases so a stylesheet that predates the
+     Artist-First shell does not need a rewrite to be re-themed. */
+  --bg: var(--canvas);
+  --panel-2: var(--hover);
 }
 
 * {
@@ -32,84 +50,24 @@ body {
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--canvas);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 14px;
+  font-family: var(--font);
+  font-size: 13px;
+  /* RULE 5 asks for compact: a designer's eye is on the artwork, and a 14px
+     chrome eats the room the drawing needs. 13px is the size of the labels in
+     the reference tools, and 1.35 is the line-height they set them at. */
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
 }
 
-.app {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
+/* (`.app` is styled at the end of this file, with the rest of the Task 13.0
+ * shell: the layout only makes sense alongside `.workspace` and `.stage`.) */
 
-/* ── Header ─────────────────────────────────────────────────────────── */
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.brand-mark {
-  font-size: 26px;
-  color: var(--accent);
-}
-
-.brand h1 {
-  margin: 0;
-  font-size: 18px;
-  letter-spacing: 0.25em;
-}
-
-.brand p {
-  margin: 0;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--panel-2);
-}
-
-.status .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--muted);
-}
-
-.status-loading .dot {
-  background: var(--amber);
-  animation: pulse 1s infinite alternate;
-}
-
-.status-ready .dot {
-  background: var(--green);
-}
-
-.status-error .dot {
-  background: var(--red);
-}
-
+/* ── The old console shell is gone ───────────────────────────────────────
+ * `.header` and `.status` belonged to the pre-Task-13.0 layout (a title bar with
+ * a pill in it); `.main` was its two-column grid. The Artist-First shell at the
+ * end of this file replaces all three. */
 @keyframes pulse {
   from {
     opacity: 0.4;
@@ -117,22 +75,6 @@ body {
   to {
     opacity: 1;
   }
-}
-
-/* ── Layout ─────────────────────────────────────────────────────────── */
-
-.main {
-  flex: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  grid-template-areas:
-    'canvas side'
-    'bottom bottom';
-  gap: 12px;
-  padding: 12px 20px 20px;
-  max-width: 1400px;
-  width: 100%;
-  margin: 0 auto;
 }
 
 .panel {
@@ -212,17 +154,17 @@ body {
 }
 
 .dep-to {
-  color: var(--accent, #6ea8fe);
+  color: var(--accent);
 }
 
 /* ── Incrementality affordances (Task 2.2) ──────────────────────────── */
 
 .log-dirty {
-  color: var(--accent, #6ea8fe);
+  color: var(--accent);
 }
 
 .dirty-chip {
-  color: var(--accent, #6ea8fe);
+  color: var(--accent);
   font-size: 11px;
   animation: pulse 0.6s ease-out;
 }
@@ -230,14 +172,6 @@ body {
 .layer-dirty {
   outline: 1px solid rgba(110, 168, 254, 0.45);
   outline-offset: -1px;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .eval-chip {
@@ -254,7 +188,7 @@ body {
 .eval-mode {
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--accent, #6ea8fe);
+  color: var(--accent);
   font-weight: 600;
 }
 
@@ -280,7 +214,7 @@ body {
   border-radius: 6px;
   border: 1px solid var(--border);
   display: block;
-  background: #0a0d12;
+  background: var(--canvas);
 }
 
 .canvas-wrap {
@@ -370,9 +304,9 @@ body {
   padding: 1px 4px;
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--fg, #eee);
+  color: var(--text);
   background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--line, #333);
+  border: 1px solid var(--border);
   border-radius: 4px;
 }
 
@@ -440,7 +374,7 @@ body {
   gap: 2px;
   pointer-events: auto;
   background: rgba(10, 13, 18, 0.72);
-  border: 1px solid var(--line, #333);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 2px;
 }
@@ -451,7 +385,7 @@ body {
   padding: 0 6px;
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--fg, #eee);
+  color: var(--text);
   background: transparent;
   border: 0;
   border-radius: 4px;
@@ -463,7 +397,7 @@ body {
 }
 
 .nav-button:disabled {
-  color: var(--muted, #888);
+  color: var(--muted);
   cursor: default;
 }
 
@@ -652,7 +586,7 @@ button:disabled {
 .log {
   font-family: var(--mono);
   font-size: 12px;
-  background: #0a0d12;
+  background: var(--canvas);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
@@ -914,8 +848,8 @@ button:disabled {
 .badge-live {
   font-size: 10px;
   letter-spacing: 0.02em;
-  color: var(--accent, #7cc4ff);
-  border: 1px solid color-mix(in srgb, var(--accent, #7cc4ff) 45%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: 999px;
   padding: 1px 7px;
   white-space: nowrap;
@@ -931,15 +865,15 @@ button:disabled {
 .chip {
   font-size: 10px;
   padding: 1px 6px;
-  border: 1px solid var(--line, #333);
+  border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
-  color: var(--muted, #999);
+  color: var(--muted);
 }
 
 button.chip:hover {
-  color: var(--fg, #eee);
-  border-color: var(--muted, #999);
+  color: var(--text);
+  border-color: var(--muted);
   cursor: pointer;
 }
 
@@ -948,7 +882,7 @@ button.chip:hover {
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: var(--muted, #999);
+  color: var(--muted);
 }
 
 ul.motion {
@@ -963,7 +897,7 @@ ul.motion li {
   align-items: center;
   gap: 6px;
   padding: 3px 0;
-  border-top: 1px solid var(--line, #2a2a2a);
+  border-top: 1px solid var(--border);
 }
 
 /* Upright and monospaced so a value column stays a column. */
@@ -976,17 +910,17 @@ ul.motion li {
 
 .motion-value {
   font-variant-numeric: tabular-nums;
-  color: var(--muted, #999);
+  color: var(--muted);
 }
 
 .motion-live {
-  color: var(--accent, #7cc4ff);
+  color: var(--accent);
   width: 12px;
   text-align: center;
 }
 
 .motion-rest {
-  color: var(--line, #555);
+  color: var(--border);
   width: 12px;
   text-align: center;
 }
@@ -1289,7 +1223,7 @@ select {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 10px;
-  color: #6b7482;
+  color: var(--muted);
   margin-right: 2px;
 }
 .doc-button {
@@ -1317,7 +1251,7 @@ select {
   flex: 1;
 }
 .doc-name {
-  color: #e6edf3;
+  color: var(--text);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1325,7 +1259,7 @@ select {
 }
 .doc-untitled,
 .doc-phase {
-  color: #6b7482;
+  color: var(--muted);
 }
 .doc-host {
   display: flex;
@@ -1514,79 +1448,12 @@ select {
   opacity: 0.85;
 }
 
-/* ── The palette ──────────────────────────────────────────────────────── */
-
-.tool-palette {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.tool-row {
-  flex-wrap: wrap;
-}
-
-button.tool {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-button.tool.active {
-  border-color: #ffd479;
-  color: #ffd479;
-  box-shadow: inset 0 0 0 1px rgba(255, 212, 121, 0.25);
-}
-
-button.tool kbd {
-  font-size: 9px;
-  opacity: 0.6;
-  border: 1px solid rgba(215, 227, 244, 0.3);
-  border-radius: 3px;
-  padding: 0 3px;
-}
-
-.tool-status,
-.tool-status-line {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  color: #9fb4d0;
-}
-
+/* The old palette and the designer rail are gone with the shell they belonged
+ * to (Task 13.0): the dock replaced the first, and the studio drawer the second.
+ * The one rule here that outlived them is the status line's note — now written
+ * in the accent's amber cousin rather than a stray hex. */
 .hold-note {
-  color: #ffd479;
-}
-
-/* ── The designer rail (what stands in for the parametric panels) ─────── */
-
-.designer-rail .tool-blurb {
-  color: #9fb4d0;
-  font-size: 12px;
-}
-
-.designer-facts {
-  list-style: none;
-  margin: 8px 0;
-  padding: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-}
-
-.designer-facts li {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 2px 0;
-  border-bottom: 1px solid rgba(215, 227, 244, 0.08);
-}
-
-.fact-k {
-  color: #6f86a3;
-}
-
-.fact-v {
-  color: #d7e3f4;
+  color: var(--amber);
 }
 
 /* ── Task 10.2 · the workspace panels ───────────────────────────────────────
@@ -1633,14 +1500,14 @@ button.tool kbd {
   background: rgba(215, 227, 244, 0.08);
   border: 1px solid var(--border);
   border-radius: 5px;
-  color: #d7e3f4;
+  color: var(--text);
   cursor: pointer;
   font-size: 10px;
   padding: 2px 7px;
 }
 
 .mini:hover:not(:disabled) {
-  border-color: #7aa2d8;
+  border-color: var(--accent);
 }
 
 .mini:disabled,
@@ -1675,7 +1542,7 @@ button.tool kbd {
 }
 
 .layer-row.active {
-  border-color: #4b7fc4;
+  border-color: var(--accent);
 }
 
 .layer-row.hidden .layer-name,
@@ -1689,7 +1556,7 @@ button.tool kbd {
 }
 
 .layer-row.drop-target {
-  border-color: #7aa2d8;
+  border-color: var(--accent);
   background: rgba(122, 162, 216, 0.16);
 }
 
@@ -1711,12 +1578,12 @@ button.tool kbd {
 
 .icon:hover:not(:disabled) {
   background: rgba(215, 227, 244, 0.12);
-  color: #eaf1fb;
+  color: var(--text);
 }
 
 .icon.on {
   background: rgba(122, 162, 216, 0.3);
-  color: #eaf1fb;
+  color: var(--text);
 }
 
 .icon.danger:hover:not(:disabled) {
@@ -1743,12 +1610,12 @@ button.tool kbd {
 }
 
 .layer-flags {
-  color: #6f86a3;
+  color: var(--muted);
   font-size: 10px;
 }
 
 .node-dot {
-  color: #6f86a3;
+  color: var(--muted);
   font-size: 10px;
   width: 12px;
   text-align: center;
@@ -1756,18 +1623,18 @@ button.tool kbd {
 
 .rename,
 .width-input {
-  background: #16202e;
-  border: 1px solid #4b7fc4;
+  background: var(--hover);
+  border: 1px solid var(--accent);
   border-radius: 4px;
-  color: #eaf1fb;
+  color: var(--text);
   font: inherit;
   padding: 1px 4px;
   min-width: 60px;
 }
 
 .chip-active {
-  color: #9fd0ff;
-  border-color: #4b7fc4;
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /* ── Appearance ─────────────────────────────────────────────────────────── */
@@ -1793,7 +1660,7 @@ button.tool kbd {
 
 .appearance-grip {
   cursor: grab;
-  color: #6f86a3;
+  color: var(--muted);
 }
 
 .paint-kind,
@@ -1822,7 +1689,7 @@ button.tool kbd {
 
 .appearance-caption {
   font-size: 11px;
-  color: #b9c9dd;
+  color: var(--muted);
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1841,7 +1708,7 @@ button.tool kbd {
   left: 0;
   display: flex;
   flex-direction: column;
-  background: #16202e;
+  background: var(--hover);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 3px;
@@ -1866,7 +1733,7 @@ button.tool kbd {
 
 .opacity-value {
   font-size: 10px;
-  color: #6f86a3;
+  color: var(--muted);
   min-width: 30px;
 }
 
@@ -1890,7 +1757,7 @@ button.tool kbd {
   height: 22px;
   margin-left: -6px;
   border-radius: 3px;
-  border: 2px solid #eaf1fb;
+  border: 2px solid var(--text);
   padding: 0;
   cursor: ew-resize;
 }
@@ -1920,10 +1787,10 @@ button.tool kbd {
 }
 
 .artboard-select select {
-  background: #16202e;
+  background: var(--hover);
   border: 1px solid var(--border);
   border-radius: 5px;
-  color: #eaf1fb;
+  color: var(--text);
   font: inherit;
   font-size: 12px;
   padding: 3px 6px;
@@ -1940,7 +1807,7 @@ button.tool kbd {
   background: rgba(215, 227, 244, 0.08);
   border: 1px solid var(--border);
   border-radius: 5px;
-  color: #d7e3f4;
+  color: var(--text);
   cursor: pointer;
   font: inherit;
   font-size: 11px;
@@ -1948,7 +1815,7 @@ button.tool kbd {
 }
 
 .artboard-actions button:hover:not(:disabled) {
-  border-color: #7aa2d8;
+  border-color: var(--accent);
 }
 
 .artboard-detail {
@@ -1957,7 +1824,7 @@ button.tool kbd {
   gap: 8px;
   margin-top: 8px;
   font-size: 11px;
-  color: #b9c9dd;
+  color: var(--muted);
 }
 
 .artboard-detail .chip {
@@ -1970,7 +1837,7 @@ button.tool kbd {
 .link {
   background: none;
   border: none;
-  color: #9fd0ff;
+  color: var(--accent);
   cursor: pointer;
   font: inherit;
   padding: 0;
@@ -2003,7 +1870,7 @@ button.tool kbd {
 .magic-bar {
   width: min(680px, 92vw);
   background: #131a26;
-  border: 1px solid #2b3a52;
+  border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
   padding: 14px 16px 12px;
@@ -2022,9 +1889,9 @@ button.tool kbd {
 .magic-input {
   flex: 1;
   background: #0d131d;
-  border: 1px solid #2b3a52;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #e8eef8;
+  color: var(--text);
   font: inherit;
   font-size: 14px;
   padding: 9px 11px;
@@ -2032,7 +1899,7 @@ button.tool kbd {
 
 .magic-input:focus {
   outline: none;
-  border-color: #4a86d8;
+  border-color: var(--accent);
 }
 
 .magic-chips {
@@ -2044,9 +1911,9 @@ button.tool kbd {
 
 .magic-chip {
   background: #1b2536;
-  border: 1px solid #2b3a52;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  color: #cfe0f5;
+  color: var(--text);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
@@ -2054,7 +1921,7 @@ button.tool kbd {
 }
 
 .magic-chip:hover {
-  border-color: #4a86d8;
+  border-color: var(--accent);
   color: #ffffff;
 }
 
@@ -2062,7 +1929,7 @@ button.tool kbd {
 .magic-foot {
   margin: 8px 0 0;
   font-size: 11px;
-  color: #8ea3bd;
+  color: var(--muted);
 }
 
 .magic-prose {
@@ -2092,24 +1959,24 @@ button.tool kbd {
 .prop-label {
   flex: 0 0 96px;
   font-size: 12px;
-  color: #cfe0f5;
+  color: var(--text);
 }
 
 .prop-derived {
-  color: #8ea3bd;
+  color: var(--muted);
   font-size: 10px;
 }
 
 .prop-list input[type='range'] {
   flex: 1;
-  accent-color: #4a86d8;
+  accent-color: var(--accent);
 }
 
 .prop-list input[type='color'] {
   width: 44px;
   height: 22px;
   padding: 0;
-  border: 1px solid #2b3a52;
+  border: 1px solid var(--border);
   border-radius: 4px;
   background: none;
 }
@@ -2118,16 +1985,16 @@ button.tool kbd {
   flex: 0 0 44px;
   text-align: right;
   font-size: 11px;
-  color: #9fd0ff;
+  color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 
 .icon-sizes {
   flex: 1;
   background: #0d131d;
-  border: 1px solid #2b3a52;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #e8eef8;
+  color: var(--text);
   font: inherit;
   font-size: 12px;
   padding: 5px 8px;
@@ -2163,7 +2030,7 @@ button.tool kbd {
   display: flex;
   justify-content: space-between;
   font-size: 10px;
-  color: #8fa3bb;
+  color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -2201,7 +2068,7 @@ button.tool kbd {
 .colordrop-hint {
   flex: 1 0 100%;
   font-size: 10px;
-  color: #8fa3bb;
+  color: var(--muted);
 }
 
 /* The chip that follows the pointer while a colour is in flight. Fixed, so it
@@ -2217,4 +2084,1211 @@ button.tool kbd {
   pointer-events: none;
   z-index: 40;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   **Task 13.0 — the artist-first shell.**
+
+   RULE 5's palette is the `:root` block at the top of this file; one palette,
+   one accent (`--accent` is *selection*, nothing else), one hover surface, one
+   keyline. Everything below is laid out in that vocabulary and nowhere else —
+   a hard-coded hex in this section would be the first crack in the theme.
+
+   The layout is deliberately four fixed edges and one flexible middle:
+
+       ┌───────────────────────────── top bar ─────────────────────────────┐
+       │ dock │            stage (the canvas)            │   side panel    │
+       └────────────────────────── bottom bar ─────────────────────────────┘
+
+   Focus mode (RULE 3) removes all four edges and lets the stage take the
+   window; the edge reveal brings them back as overlays. Nothing reflows the
+   document, so a designer in the middle of a stroke never sees the artwork
+   jump.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--canvas);
+}
+
+/* The one scrolling, growing region: the stage and the two side rails. */
+.workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--canvas);
+  display: flex;
+  flex-direction: column;
+}
+
+/* The status line is the stage's only permanent text: what the gesture in hand
+   is doing, in the designer's words. It is chrome, but it belongs to the
+   canvas, so it sits *on* the canvas rather than in a bar. */
+.status-line {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--canvas) 78%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  pointer-events: none;
+  max-width: calc(100% - 24px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-line .hold-note {
+  color: var(--accent);
+}
+
+.diag-strip {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  max-width: min(560px, 60%);
+  margin: 0;
+  align-items: flex-end;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* ── The top bar ──────────────────────────────────────────────────────── */
+
+.top-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 6px;
+  user-select: none;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #0b0b0b;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.brand-name {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--text);
+}
+
+/* The flexible gap: file and artboard on the left, engine state on the right,
+   and whatever room is left belongs to the canvas. */
+.top-spacer,
+.side-tabs-spacer,
+.drawer-head-spacer,
+.panel-head-spacer,
+.disclose-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.top-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.top-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.top-btn[aria-pressed='true'] {
+  background: var(--hover);
+  border-color: var(--border);
+  color: var(--accent);
+}
+
+/* The engine's liveness: one dot, three states. Its *words* are in `title`, so
+   the bar stays a bar and the explanation is one hover away. */
+.engine-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--muted);
+}
+
+.engine-dot.status-loading {
+  background: var(--amber);
+  animation: pulse 1s infinite alternate;
+}
+
+.engine-dot.status-ready {
+  background: var(--green);
+}
+
+.engine-dot.status-error {
+  background: var(--red);
+}
+
+/* The evaluation chip is developer chrome (Task 13.0 step 5): it renders only
+   while the Developer switch is on, and it reads like a console because that is
+   what it is for. */
+.dev-chip {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+/* ── RULE 1: the left dock ────────────────────────────────────────────── */
+
+.dock {
+  flex: 0 0 auto;
+  width: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+
+.dock-group {
+  position: relative;
+}
+
+.dock-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.dock-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.dock-group.active .dock-btn,
+.dock-btn[aria-expanded='true'] {
+  background: var(--hover);
+  border-color: var(--border);
+  color: var(--accent);
+}
+
+/* The group's second glyph: the letter of the tool the group's first entry
+   holds, so a glance tells Paint from Pen without a tooltip. */
+.dock-glyph {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+/* The hold-to-open flyout. It opens *beside* the dock, on the canvas side, so
+   it never covers the rail the hand is on. */
+.dock-flyout {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: -4px;
+  z-index: 30;
+  min-width: 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 55%);
+}
+
+.dock-flyout-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+  padding: 3px 7px 5px;
+}
+
+.dock-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dock-entry:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.dock-entry.active {
+  color: var(--accent);
+}
+
+.dock-entry-label {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.dock-entry kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+/* ── RULE 1: the right panel ──────────────────────────────────────────── */
+
+.side-panel {
+  flex: 0 0 auto;
+  width: 272px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+
+.side-panel.collapsed {
+  width: 38px;
+}
+
+.side-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.side-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-tab:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.side-tab.active {
+  background: var(--hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.side-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* A collapsed panel keeps its tabs (that is the way back) and drops the body. */
+.side-panel.collapsed .side-tab span {
+  display: none;
+}
+
+/* ── The panels inside the rails ──────────────────────────────────────── */
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px 7px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 2;
+}
+
+.panel-head h2,
+.panel-head h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.panel-section {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.field span {
+  min-width: 42px;
+}
+
+.field input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.field-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.field-inline input,
+.field-inline select {
+  height: 22px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+
+/* **Transform / Geometry** (RULE 1's Properties tab): two columns of labelled
+   numbers and a four-cell geometry grid. Numbers are monospaced so a column of
+   them lines up and a value changes without the label moving. */
+.properties-panel {
+  padding: 0;
+}
+
+.slot-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.slot-label {
+  flex: 0 0 58px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.slot-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.slot-input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.slot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.slot-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.slot-action:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.slot-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.slot-link {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* **Text** (the Text panel, restyled): the string, the metrics, and the path a
+   run can be bound to. */
+.text-panel .text-string {
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  padding: 6px 7px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.text-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.text-path-row,
+.text-bound {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.text-align {
+  display: flex;
+  gap: 3px;
+}
+
+.text-offset {
+  width: 100%;
+}
+
+.param-src {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.blend-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: var(--hover);
+  color: var(--text);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Operation and generator rows in the drawer: a kind, a sentence, and the
+   numbers it resolves to. */
+.op-row,
+.proc-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.op-row.op-parked {
+  opacity: 0.55;
+}
+
+/* ── RULE 3: the canvas HUD ───────────────────────────────────────────── */
+
+.canvas-hud {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 8px 22px rgb(0 0 0 / 50%);
+  backdrop-filter: blur(6px);
+}
+
+.hud-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.hud-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--accent);
+}
+
+.hud-btn:disabled {
+  color: var(--muted);
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.hud-more {
+  border-left: 1px solid var(--border);
+  border-radius: 0 6px 6px 0;
+}
+
+/* ── RULE 1: the dynamic bottom bar ───────────────────────────────────── */
+
+.bottom-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.bottom-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.bar-caption {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bar-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.bar-name {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.bar-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bar-slider-label {
+  min-width: 38px;
+}
+
+.bar-slider input[type='range'] {
+  width: 104px;
+  accent-color: var(--accent);
+}
+
+.bar-slider input[type='range']:disabled {
+  opacity: 0.4;
+}
+
+.bar-slider-value {
+  min-width: 38px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text);
+}
+
+.bar-seg {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bar-seg:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.bar-seg:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.bar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+}
+
+.bar-zoom {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 42px;
+  text-align: center;
+}
+
+/* The node bar's state chip: a *reading*, not a control, so it wears the
+   accent's quiet cousin rather than a button's border. */
+.bar-align {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--hover);
+  border-radius: 999px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+/* A colour dot: the swatch is the control, the picker is behind it. */
+.bar-dot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+}
+
+.bar-dot-ring {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--text);
+  border-radius: 50%;
+}
+
+.bar-dot-fill {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.bar-dot input[type='color'] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* ── RULE 3: focus mode ───────────────────────────────────────────────── */
+
+/* Focus mode is *the artwork only*: the four edges leave the layout entirely, so
+   the canvas is the window and nothing reflows around a hidden bar. */
+.app.focus-mode .top-bar,
+.app.focus-mode .bottom-bar,
+.app.focus-mode .dock,
+.app.focus-mode .side-panel {
+  display: none;
+}
+
+.app.focus-mode .stage {
+  background: var(--canvas);
+}
+
+/* The soft reveal: the pointer reaching an edge brings the chrome back, as an
+   overlay above the artwork rather than as a reflow of it. */
+.app.focus-peek .top-bar,
+.app.focus-peek .bottom-bar,
+.app.focus-peek .dock,
+.app.focus-peek .side-panel {
+  display: flex;
+  position: fixed;
+  z-index: 40;
+  animation: focus-reveal 160ms ease-out;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 60%);
+}
+
+.app.focus-peek .top-bar {
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.app.focus-peek .bottom-bar {
+  bottom: 0;
+  left: 0;
+  right: 0;
+}
+
+.app.focus-peek .dock {
+  left: 0;
+  top: 24px;
+  bottom: 24px;
+  flex-direction: column;
+  border-radius: 0 10px 10px 0;
+}
+
+.app.focus-peek .side-panel {
+  right: 0;
+  top: 24px;
+  bottom: 24px;
+  flex-direction: column;
+  border-radius: 10px 0 0 10px;
+}
+
+@keyframes focus-reveal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* The edge affordances: four thin glows that say "there is something here".
+   They are inert (`pointer-events: none`) — the reveal is driven by the pointer
+   position, not by these spans, which is why they can stay `aria-hidden`. */
+.focus-edge {
+  position: fixed;
+  z-index: 30;
+  pointer-events: none;
+  opacity: 0.5;
+  background: var(--accent);
+  animation: focus-edge-breathe 2.4s ease-in-out infinite alternate;
+}
+
+.focus-left,
+.focus-right {
+  top: 15%;
+  bottom: 15%;
+  width: 2px;
+}
+
+.focus-left {
+  left: 0;
+}
+
+.focus-right {
+  right: 0;
+}
+
+.focus-top,
+.focus-bottom {
+  left: 15%;
+  right: 15%;
+  height: 2px;
+}
+
+.focus-top {
+  top: 0;
+}
+
+.focus-bottom {
+  bottom: 0;
+}
+
+.app.focus-peek .focus-edge {
+  opacity: 0;
+  animation: none;
+}
+
+@keyframes focus-edge-breathe {
+  from {
+    opacity: 0.18;
+  }
+  to {
+    opacity: 0.55;
+  }
+}
+
+/* ── The studio drawer ────────────────────────────────────────────────── */
+
+.studio-drawer {
+  position: fixed;
+  right: 0;
+  top: 40px;
+  bottom: 40px;
+  z-index: 35;
+  width: min(420px, 46vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  box-shadow: -14px 0 34px rgb(0 0 0 / 50%);
+  animation: drawer-in 140ms ease-out;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(14px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.drawer-head::-webkit-scrollbar {
+  display: none;
+}
+
+.drawer-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.drawer-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.drawer-tab:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.drawer-tab.active {
+  background: var(--hover);
+  border-color: var(--border);
+  color: var(--accent);
+}
+
+/* The Developer switch is a switch, not a tab: it changes *what the drawer is
+   willing to show*, and it says so with an amber lamp. */
+.drawer-dev {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.drawer-dev.active {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.drawer-body .panel {
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  padding: 10px;
+}
+
+.deps-panel,
+.log-panel {
+  padding: 10px;
+}
+
+/* The raw command JSON, in the Developer view only. */
+.log-json {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  word-break: break-all;
+  user-select: text;
+}
+
+.engine-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── The colour in flight ─────────────────────────────────────────────── */
+
+.colordrop-ghost {
+  position: fixed;
+  z-index: 60;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2px solid var(--text);
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 55%);
+}
+
+/* ── The last of the Task 13.0 surface ────────────────────────────────── */
+
+/* One rail at a time: the studio opens over the right edge, so the inspector
+   gives way to it rather than stacking two panels against the same border. */
+.app.drawer-open .side-panel {
+  display: none;
+}
+
+/* The region spans a path can be broken at (Task 12.0 RULE 3) — a list of
+   numbers and one verb each. */
+.span-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.span-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+/* The little icon buttons on a layer row (alpha, clip, rename, delete). They
+   are glyphs, so they get glyph size and a hover, and never a border. */
+.text-icon {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.text-icon:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.text-icon[aria-pressed='true'] {
+  color: var(--accent);
+}
+
+.text-icon:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* The paint well: drag the grip onto a shape to fill it (Task 10.7). */
+.well-grip {
+  font-size: 11px;
+  letter-spacing: -1px;
+  color: var(--muted);
+}
+
+.well-picker {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.well-picker input[type='color'] {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+/* **RULE 2: the type indicator.** One glyph beside the name, at a size that
+   reads without becoming a column: `◉` paint, `◇` vector, `▣` group, `⌁`
+   adjustment or mask, `T` text. The distinction the colour carries is the one
+   that matters in a dark panel — art that *is* the picture (paint, text) is
+   bright, structure (vector, group) is dim, and a mask is amber because it is
+   the one row that changes what the rows around it look like. */
+.type-mark {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.type-mark.type-raster,
+.type-mark.type-text {
+  color: var(--text);
+}
+
+.type-mark.type-adjustment {
+  color: var(--amber);
 }
