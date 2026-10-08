@@ -1,12 +1,21 @@
 /**
- * **The canvas HUD** (Task 13.0 RULE 3).
+ * **The canvas HUD** (Task 13.0 RULE 3 + Task 14.0 RULE 4).
  *
- * A small floating bar that appears next to a selection with the actions a
- * designer reaches for while looking at the artwork rather than at a panel:
- * Duplicate, Flip, Rotate, Boolean, More.
+ * A small floating bar that appears next to a selection with:
+ * - **RULE 4 quick edits**: Fill colour, Stroke colour, Stroke width — the
+ *   controls a designer reaches for *while looking at the artwork*, not at a
+ *   panel. This is the "Procreate feel": inline, contextual, always within
+ *   arm's reach of the selection.
+ * - **RULE 3 actions**: Duplicate, Flip, Rotate, Boolean, More.
  *
- * Two things about it are worth stating, because both are deliberate and both
- * come from the audit rather than from taste:
+ * The colour and width controls are optional props — when the caller passes
+ * them, the well renders; when it does not (tests, or a future simplified
+ * view), the HUD falls back to the action buttons alone. That keeps the
+ * component honest about what the engine has wired up without forcing every
+ * mount site to know about appearance state.
+ *
+ * Two things about the action buttons are worth stating, because both are
+ * deliberate and both come from the audit rather than from taste:
  *
  * 1. **It positions itself from the engine's numbers.** `selectionAnchor`
  *    (pure, tested) reads the *resolved* primitive the snapshot already carries
@@ -19,10 +28,6 @@
  *    disabled unless exactly two objects are selected (the engine's booleans are
  *    binary). The reason is in the tooltip. A control that vanishes teaches
  *    nothing; one that says *why* teaches the model.
- *
- * The `More` action opens the right panel's Properties tab rather than a popover
- * menu of its own: there is exactly one place in this app where an object's
- * numbers live, and a second one would be a second truth.
  */
 
 import {
@@ -54,6 +59,15 @@ export interface CanvasHUDProps {
   primaryName: string | null;
   onAction: (action: HudActionId) => void;
   disabled?: boolean;
+
+  /** Task 14.0 RULE 4: the quick-edit well — when provided, the HUD shows
+   *  inline fill/stroke colour and stroke width controls. */
+  fillColor?: string | null;
+  strokeColor?: string | null;
+  strokeWidth?: number | null;
+  onFillColor?: (color: string) => void;
+  onStrokeColor?: (color: string) => void;
+  onStrokeWidth?: (width: number) => void;
 }
 
 export default function CanvasHUD({
@@ -63,9 +77,18 @@ export default function CanvasHUD({
   primaryName,
   onAction,
   disabled,
+  fillColor,
+  strokeColor,
+  strokeWidth,
+  onFillColor,
+  onStrokeColor,
+  onStrokeWidth,
 }: CanvasHUDProps) {
   const model = canvasHud(selectionCount, primaryName);
   if (selectionCount === 0) return null;
+
+  const hasWell = Boolean(onFillColor || onStrokeColor || onStrokeWidth);
+
   return (
     <div
       className="canvas-hud"
@@ -77,6 +100,75 @@ export default function CanvasHUD({
       // would also drop a selection (`pointerdown` on the canvas clears it).
       onPointerDown={(event) => event.stopPropagation()}
     >
+      {/* Task 14.0 RULE 4: the quick-edit well — fill, stroke, width, inline.
+          Only rendered when the caller wires them up. */}
+      {hasWell && (
+        <div className="hud-well" data-testid="hud-well">
+          {onFillColor && (
+            <label
+              className="hud-color"
+              data-testid="hud-fill-color"
+              title="Fill colour"
+              aria-label="Fill colour"
+            >
+              <span
+                className="hud-color-swatch"
+                style={{ background: fillColor ?? '#000000' }}
+              />
+              <input
+                type="color"
+                value={fillColor ?? '#000000'}
+                disabled={disabled}
+                onChange={(e) => onFillColor(e.target.value)}
+                aria-label="Pick fill colour"
+              />
+            </label>
+          )}
+          {onStrokeColor && (
+            <label
+              className="hud-color"
+              data-testid="hud-stroke-color"
+              title="Stroke colour"
+              aria-label="Stroke colour"
+            >
+              <span
+                className="hud-color-swatch"
+                style={{
+                  background: strokeColor ?? 'transparent',
+                  border: strokeColor ? 'none' : '1.5px dashed var(--muted)',
+                }}
+              />
+              <input
+                type="color"
+                value={strokeColor ?? '#000000'}
+                disabled={disabled}
+                onChange={(e) => onStrokeColor(e.target.value)}
+                aria-label="Pick stroke colour"
+              />
+            </label>
+          )}
+          {onStrokeWidth && (
+            <div className="hud-width" data-testid="hud-stroke-width">
+              <input
+                type="range"
+                min={0}
+                max={24}
+                step={0.5}
+                value={strokeWidth ?? 0}
+                disabled={disabled}
+                aria-label="Stroke width"
+                onChange={(e) => onStrokeWidth(Number(e.target.value))}
+              />
+              <span className="hud-width-value">
+                {strokeWidth != null ? strokeWidth : 0}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {hasWell && <span className="hud-well-divider" aria-hidden="true" />}
+
       {model.actions.map((action) => {
         const Icon = HUD_ICON[action.icon] ?? Copy;
         const unavailable = disabled || !action.enabled;

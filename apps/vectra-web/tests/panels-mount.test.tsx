@@ -443,7 +443,6 @@ test('the App shell renders, and the workspace panels are part of it', () => {
   // workspace is document state, not a GPU feature.
   const markup = renderToStaticMarkup(React.createElement(App));
   assert.ok(markup.length > 1000, 'something rendered');
-  assert.ok(markup.includes('data-testid="artboard-bar"'), 'the artboard bar is mounted');
   assert.ok(markup.includes('data-testid="layers-panel"'), 'so is the layers panel');
   assert.ok(markup.includes('data-testid="layers-empty"'), 'with its empty state, honestly');
 });

@@ -465,7 +465,9 @@ test('RULE 5: one palette — the CSS and the constant are the same numbers', ()
   assert.equal(THEME.canvas, '#121212');
   assert.equal(THEME.panel, '#1e1e1e');
   assert.equal(THEME.hover, '#252526');
-  assert.equal(THEME.border, '#3e3e42');
+  // Task 14.0: the border darkened from #3e3e42 to #333333 for a tighter,
+  // more premium surface separation — the test tracks the new value.
+  assert.equal(THEME.border, '#333333');
   assert.equal(THEME.text, '#e0e0e0');
   assert.equal(THEME.textDim, '#a0a0a0');
   assert.match(token('font'), /^Inter,/, 'RULE 5’s type: Inter when the machine has it');
