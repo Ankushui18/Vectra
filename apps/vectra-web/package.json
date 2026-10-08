@@ -2,7 +2,7 @@
   "name": "vectra-web",
   "private": true,
   "version": "0.1.0",
-  "description": "VECTRA web remote control: dumb React UI over the WASM engine (MES \u00a715\u2013\u00a716, Task 1.4)",
+  "description": "VECTRA web remote control: dumb React UI over the WASM engine (MES §15–§16, Task 1.4)",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.tests.json"
   },
   "dependencies": {
+    "lucide-react": "^1.53.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

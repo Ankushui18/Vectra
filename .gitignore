@@ -1,0 +1,7 @@
+# Build output. `src/wasm/*` is deliberately *not* ignored: the compiled engine
+# is a checked-in artifact of `scripts/build-wasm.sh` (see docs/ENGINE_STATUS.md),
+# so a clone can run the web app without a Rust toolchain. Everything below is
+# reproducible from source and should never be committed.
+node_modules/
+dist/
+target/
